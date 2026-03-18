@@ -22,6 +22,7 @@ pyzmq = ">=26.0.0,<27.0.0"
 fastapi = "^0.115.0"
 uvicorn = {extras = ["standard"], version = "^0.32.0"}
 pydantic = "^2.10.0"
+dnspython = "^2.6.0"  # For DNS-01 challenge validation
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

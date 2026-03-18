@@ -46,9 +46,27 @@ class SQLiteStorage(AbstractStorage):
         if self._connection is None:
             # Ensure directory exists
             os.makedirs(self.data_dir, exist_ok=True)
-            self._connection = sqlite3.connect(self.db_path)
+            self._connection = sqlite3.connect(self.db_path, check_same_thread=False)
             self._connection.row_factory = sqlite3.Row
+            # Enable WAL mode for better concurrency
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            # Enable foreign keys
+            self._connection.execute("PRAGMA foreign_keys=ON")
         return self._connection
+
+    def close(self) -> None:
+        """Close the database connection."""
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+
+    def __enter__(self) -> "SQLiteStorage":
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit - ensures connection is closed."""
+        self.close()
 
     def initialize(self) -> None:
         """Initialize the storage backend.

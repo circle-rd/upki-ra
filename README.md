@@ -1,161 +1,219 @@
 # uPKI RA Server
 
-Registration Authority (RA) Server for the uPKI Public Key Infrastructure system.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+[![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+
+Registration Authority (RA) Server for the uPKI Public Key Infrastructure system. Provides a complete ACME v2 server implementation for automated certificate management.
 
 ## Overview
 
-The uPKI RA Server provides a REST API for certificate enrollment, renewal, and revocation. It acts as an intermediary between clients and the Certificate Authority (CA), handling:
+The uPKI RA Server acts as an intermediary between clients and the Certificate Authority (CA), supporting multiple certificate enrollment protocols:
 
-- Certificate enrollment via CSR signing
-- Certificate renewal
-- Certificate revocation
-- Node registration
-- Administrator management
-- CRL distribution
-- OCSP responder integration
+- **ACME v2** (RFC 8555) - Automated Certificate Management Environment
+- **REST API** - Traditional CSR-based certificate enrollment
+- **mTLS Authentication** - Certificate-based client authentication
 
 ## Architecture
 
-```
-┌─────────────┐     mTLS      ┌─────────────┐     ZMQ      ┌─────────────┐
-│   Clients   │──────────────▶│  RA Server  │──────────────▶│  CA Server  │
-└─────────────┘               └─────────────┘               └─────────────┘
-   - Public API                     - Public API
-     /certify                        /health
-     /certs/*                        /certify
-     /crl                           /certs/*
-     /ocsp                          /crl
-                                   /profiles
-                                   /ocsp
+```mermaid
+graph TB
+    subgraph "Clients"
+        ACME[ACME Clients<br/>cert-manager, Traefik]
+        REST[REST API Clients]
+    end
 
-                                 - Private API (Admin mTLS)
-                                   /nodes
-                                   /admins
-                                   /crl/generate
+    subgraph "uPKI RA Server"
+        direction TB
+        FastAPI[FastAPI Server]
 
-                                 - Client API (Client mTLS)
-                                   /renew
-                                   /revoke
-                                   /certificate
+        subgraph "API Routes"
+            ACME_API[ACME v2<br/>/acme/*]
+            Public_API[Public REST<br/>/api/v1/*]
+            Private_API[Private Admin<br/>/api/v1/private/*]
+            Client_API[Client API<br/>/api/v1/client/*]
+        end
+
+        Storage[(SQLite<br/>ACME Data)]
+        ZMQ[ZMQ Client]
+    end
+
+    subgraph "uPKI CA Server"
+        CA[Certificate Authority<br/>Port 5000]
+    end
+
+    ACME -->|HTTPS| FastAPI
+    REST -->|HTTPS + mTLS| FastAPI
+
+    FastAPI --> ACME_API
+    FastAPI --> Public_API
+    FastAPI --> Private_API
+    FastAPI --> Client_API
+
+    ACME_API --> Storage
+    Storage --> SQLite
+
+    ZMQ -->|ZMQ| CA
+
+    linkStyle 0,1 stroke:#333,stroke-width:2px;
 ```
+
+## Key Features
+
+- **ACME v2 Server** - Complete implementation supporting HTTP-01 and DNS-01 challenge validation
+- **Multi-Protocol Support** - ACME, REST API, and mTLS authentication
+- **Certificate Lifecycle Management** - Enrollment, renewal, and revocation
+- **Kubernetes Integration** - Works with cert-manager as ACME issuer
+- **Traefik Integration** - Native ACME support for Traefik reverse proxy
 
 ## Requirements
 
 - Python 3.11+
-- Flask >= 2.0
-- Flask-CORS >= 3.0
-- pyzmq >= 20.0
-- cryptography >= 3.0
-- pyyaml >= 5.0
+- Poetry (package manager)
+- cryptography library
 
 ## Installation
 
+### 1. Clone the Repository
+
 ```bash
-# Install from source
+git clone https://github.com/circle-rd/upki-ra.git
 cd upki-ra
-pip install -e .
-
-# Or install dependencies only
-pip install -r requirements.txt
 ```
 
-## Quick Start
-
-### 1. Initialize RA
+### 2. Install Dependencies
 
 ```bash
-python ra_server.py init
+poetry install
 ```
 
-### 2. Register with CA
+### 3. Initialize RA
 
 ```bash
-python ra_server.py register -s <registration_seed>
+poetry run python ra_server.py init
 ```
 
-### 3. Start the server
+### 4. Register with CA
+
+```bash
+poetry run python ra_server.py register -s <registration_seed>
+```
+
+### 5. Start the Server
 
 ```bash
 # Default: http://127.0.0.1:8000
-python ra_server.py listen
+poetry run python ra_server.py listen
 
-# Custom host and port
-python ra_server.py listen --web-ip 0.0.0.0 --web-port 8443
+# Custom configuration
+poetry run python ra_server.py listen --web-ip 0.0.0.0 --web-port 8443
 ```
 
-## CLI Commands
+## ACME Server Setup
 
-| Command                                  | Description                  |
-| ---------------------------------------- | ---------------------------- |
-| `python ra_server.py init`               | Initialize RA data directory |
-| `python ra_server.py register -s <seed>` | Register with CA             |
-| `python ra_server.py listen`             | Start RA server              |
-| `python ra_server.py crl`                | Update CRL                   |
+### With cert-manager (Kubernetes)
 
-### Options
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: upki-issuer
+spec:
+  acme:
+    server: https://your-ra-server.com/acme/directory
+    email: admin@example.com
+    privateKeySecretRef:
+      name: upki-account-key
+    solvers:
+      - http01:
+          ingressClassName: traefik
+```
 
-| Argument       | Default       | Description       |
-| -------------- | ------------- | ----------------- |
-| `-d`, `--dir`  | `~/.upki/ra/` | RA data directory |
-| `-i`, `--ip`   | `127.0.0.1`   | CA server IP      |
-| `-p`, `--port` | `5000`        | CA server port    |
-| `--web-ip`     | `127.0.0.1`   | Web server IP     |
-| `--web-port`   | `8000`        | Web server port   |
-| `--debug`      | false         | Enable debug mode |
+### With Traefik
+
+Configure Traefik to use uPKI as the ACME server. See [Traefik Integration](docs/TRAEFIK_INTEGRATION.md) for detailed configuration.
 
 ## API Endpoints
 
-### Public API
+### ACME v2 Endpoints
 
-| Endpoint                  | Method | Description             |
-| ------------------------- | ------ | ----------------------- |
-| `/api/v1/health`          | GET    | Health check            |
-| `/api/v1/certify`         | POST   | Enroll certificate      |
-| `/api/v1/certs/<dn>`      | GET    | Get certificate details |
-| `/api/v1/certs`           | GET    | List certificates       |
-| `/api/v1/ca`              | GET    | Get CA certificate      |
-| `/api/v1/crl`             | GET    | Get CRL                 |
-| `/api/v1/profiles`        | GET    | List profiles           |
-| `/api/v1/profiles/<name>` | GET    | Get profile details     |
-| `/api/v1/ocsp`            | POST   | Check OCSP status       |
+| Endpoint                              | Method   | Description                |
+| ------------------------------------- | -------- | -------------------------- |
+| `/acme/directory`                     | GET      | ACME directory             |
+| `/acme/new-nonce`                     | GET/HEAD | Get new nonce              |
+| `/acme/new-account`                   | POST     | Create account             |
+| `/acme/new-order`                     | POST     | Create order               |
+| `/acme/authz/{id}`                    | GET      | Authorization status       |
+| `/acme/challenge/{id}/http-01`        | POST     | Validate HTTP-01 challenge |
+| `/acme/challenge/{id}/dns-01`         | POST     | Validate DNS-01 challenge  |
+| `/.well-known/acme-challenge/{token}` | GET      | HTTP-01 challenge response |
+| `/acme/order/{id}/finalize`           | POST     | Finalize order             |
+| `/acme/cert/{id}`                     | GET      | Download certificate       |
+| `/acme/revoke-cert`                   | POST     | Revoke certificate         |
 
-### Private API (Admin mTLS)
+### REST API Endpoints
 
-| Endpoint                       | Method | Description   |
-| ------------------------------ | ------ | ------------- |
-| `/api/v1/private/nodes`        | GET    | List nodes    |
-| `/api/v1/private/nodes`        | POST   | Register node |
-| `/api/v1/private/nodes/<cn>`   | DELETE | Delete node   |
-| `/api/v1/private/admins`       | GET    | List admins   |
-| `/api/v1/private/admins`       | POST   | Add admins    |
-| `/api/v1/private/admins/<dn>`  | DELETE | Remove admin  |
-| `/api/v1/private/crl/generate` | POST   | Generate CRL  |
-| `/api/v1/private/config`       | GET    | Get config    |
+| Endpoint           | Method | Description        |
+| ------------------ | ------ | ------------------ |
+| `/api/v1/health`   | GET    | Health check       |
+| `/api/v1/certify`  | POST   | Enroll certificate |
+| `/api/v1/certs`    | GET    | List certificates  |
+| `/api/v1/crl`      | GET    | Get CRL            |
+| `/api/v1/profiles` | GET    | List profiles      |
 
-### Client API (Client mTLS)
-
-| Endpoint                     | Method | Description            |
-| ---------------------------- | ------ | ---------------------- |
-| `/api/v1/client/renew`       | POST   | Renew certificate      |
-| `/api/v1/client/revoke`      | POST   | Revoke certificate     |
-| `/api/v1/client/certificate` | GET    | Get own certificate    |
-| `/api/v1/client/status`      | GET    | Get certificate status |
-
-## Configuration
-
-### Data Directory
-
-Default: `~/.upki/ra/`
+## Project Organization
 
 ```
-~/.upki/ra/
-├── ca.crt           # CA certificate
-├── crl.pem          # CRL
-├── ra.key           # RA private key
-├── ra.crt           # RA certificate
-├── ra.csr           # RA CSR
-├── config.json      # Configuration
-└── .ra.log          # Log file
+upki-ra/
+├── ra_server.py              # Main entry point
+├── pyproject.toml            # Poetry configuration
+├── README.md                 # This file
+├── docs/
+│   ├── TRAEFIK_INTEGRATION.md
+│   ├── CA_ZMQ_PROTOCOL.md
+│   ├── SPECIFICATIONS_RA.md
+│   └── SPECIFICATIONS_CA.md
+├── server/
+│   ├── __init__.py
+│   ├── registration_authority.py   # Core RA class
+│   ├── core/
+│   │   ├── upki_error.py           # Exception classes
+│   │   └── upki_logger.py          # Logging
+│   ├── routes/
+│   │   ├── acme_api.py             # ACME v2 endpoints
+│   │   ├── public_api.py           # Public REST endpoints
+│   │   ├── private_api.py          # Admin endpoints
+│   │   └── client_api.py            # Client endpoints
+│   ├── storage/
+│   │   ├── abstract.py             # Storage interface
+│   │   └── sqlite_storage.py        # SQLite implementation
+│   └── utils/
+│       ├── common.py                 # Utilities
+│       ├── tlsauth.py               # TLS authentication
+│       └── tools.py                 # ZMQ client & ACME client
+└── tests/
+    ├── test_core.py
+    ├── test_utils.py
+    └── test_routes.py
+```
+
+## CA Integration
+
+The RA server communicates with the CA server via ZMQ. For detailed protocol specifications, see the [CA ZMQ Protocol Documentation](docs/CA_ZMQ_PROTOCOL.md).
+
+```mermaid
+graph LR
+    RA[RA Server<br/>Port 8000] -->|ZMQ| CA[CA Server<br/>Port 5000]
+
+    subgraph "RA Data Directory"
+        Config[config.json]
+        Keys[ra.key, ra.crt]
+        CA_Cert[ca.crt]
+    end
+
+    RA --> Config
+    RA --> Keys
+    RA --> CA_Cert
 ```
 
 ## Development
@@ -163,49 +221,19 @@ Default: `~/.upki/ra/`
 ### Running Tests
 
 ```bash
-# Run all tests
-python -m pytest tests/
-
-# Run with coverage
-python -m pytest tests/ --cov=server
+poetry run pytest tests/
 ```
 
-### Code Structure
+### Code Style
 
-```
-upki-ra/
-├── ra_server.py              # Main entry point
-├── setup.py                  # Package setup
-├── server/
-│   ├── __init__.py
-│   ├── registrationAuthority.py  # Core RA class
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── upkiError.py      # Exception classes
-│   │   └── upkiLogger.py     # Logging
-│   ├── routes/
-│   │   ├── __init__.py
-│   │   ├── publicAPI.py      # Public endpoints
-│   │   ├── privateAPI.py     # Admin endpoints
-│   │   └── clientAPI.py       # Client endpoints
-│   └── utils/
-│       ├── __init__.py
-│       ├── common.py          # Utilities
-│       ├── tlsauth.py         # TLS authentication
-│       └── tools.py           # ZMQ client
-└── tests/
-    ├── __init__.py
-    ├── test_core.py
-    ├── test_utils.py
-    └── test_routes.py
+```bash
+poetry run ruff check .
+poetry run ruff format .
 ```
 
-## Security
+## Related Projects
 
-- **mTLS Authentication**: Private and client APIs require TLS client certificates
-- **Admin Authorization**: Admin endpoints require certificates with DNs in the admin list
-- **Certificate Validation**: All CSR and certificates are validated before processing
-- **Audit Logging**: All operations are logged for auditing
+- [uPKI CA Server](https://github.com/circle-rd/upki-ca) - Certificate Authority implementation
 
 ## License
 
