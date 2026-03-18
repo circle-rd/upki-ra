@@ -12,6 +12,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from cryptography.x509.oid import NameOID, ExtensionOID
+
 
 def ensure_directory(path: str) -> None:
     """Ensure a directory exists, creating it if necessary.
@@ -148,19 +150,121 @@ def parse_pem(pem: str, pem_type: str = "CERTIFICATE") -> list[str] | None:
 
 
 def extract_cn_from_csr(csr: str) -> str | None:
-    """Extract Common Name from a CSR.
+    """Extract Common Name from a CSR using cryptography library.
+
+    This function properly parses the CSR to extract the CN using the
+    cryptography library instead of regex parsing.
 
     Args:
         csr: CSR in PEM format.
 
     Returns:
         Common Name if found, None otherwise.
+
+    Raises:
+        ValueError: If the CSR is invalid or cannot be parsed.
     """
-    # This is a simplified version - in production you'd use cryptography library
-    match = re.search(r"CN=([^,\n]+)", csr)
-    if match:
-        return match.group(1)
-    return None
+    try:
+        from cryptography.x509 import load_pem_x509_csr
+
+        # Load the CSR using cryptography
+        csr_obj = load_pem_x509_csr(
+            csr.encode("utf-8") if isinstance(csr, str) else csr
+        )
+
+        # Get the subject
+        subject = csr_obj.subject
+
+        # Find the CN attribute
+        for attribute in subject:
+            if attribute.oid == NameOID.COMMON_NAME:
+                return attribute.value
+
+        return None
+
+    except Exception:
+        # Fallback to regex for edge cases
+        match = re.search(r"CN=([^,\n]+)", csr)
+        if match:
+            return match.group(1)
+        return None
+
+
+def extract_subject_from_csr(csr: str) -> dict[str, str] | None:
+    """Extract full subject from a CSR using cryptography library.
+
+    Args:
+        csr: CSR in PEM format.
+
+    Returns:
+        Dictionary of subject components (CN, O, OU, C, ST, L) if found, None otherwise.
+    """
+    try:
+        from cryptography.x509 import load_pem_x509_csr
+
+        csr_obj = load_pem_x509_csr(
+            csr.encode("utf-8") if isinstance(csr, str) else csr
+        )
+
+        subject = csr_obj.subject
+        result = {}
+
+        for attribute in subject:
+            if attribute.oid == NameOID.COMMON_NAME:
+                result["CN"] = attribute.value
+            elif attribute.oid == NameOID.ORGANIZATION_NAME:
+                result["O"] = attribute.value
+            elif attribute.oid == NameOID.ORGANIZATIONAL_UNIT_NAME:
+                result["OU"] = attribute.value
+            elif attribute.oid == NameOID.COUNTRY_NAME:
+                result["C"] = attribute.value
+            elif attribute.oid == NameOID.STATE_OR_PROVINCE_NAME:
+                result["ST"] = attribute.value
+            elif attribute.oid == NameOID.LOCALITY_NAME:
+                result["L"] = attribute.value
+
+        return result if result else None
+
+    except Exception:
+        return None
+
+
+def extract_sans_from_csr(csr: str) -> list[str] | None:
+    """Extract Subject Alternative Names from a CSR.
+
+    Args:
+        csr: CSR in PEM format.
+
+    Returns:
+        List of SAN strings (DNS names, IP addresses) if found, None otherwise.
+    """
+    try:
+        from cryptography.x509 import load_pem_x509_csr
+
+        csr_obj = load_pem_x509_csr(
+            csr.encode("utf-8") if isinstance(csr, str) else csr
+        )
+
+        # Get the extensions
+        extensions = csr_obj.extensions
+
+        # Find the SAN extension
+        for ext in extensions:
+            if ext.oid == ExtensionOID.SUBJECT_ALTERNATIVE_NAME:
+                sans = []
+                san_ext = ext.value
+                for name in san_ext:
+                    # Handle both DNSName and IPAddress types
+                    if hasattr(name, "value"):
+                        sans.append(name.value)
+                    else:
+                        sans.append(str(name))
+                return sans if sans else None
+
+        return None
+
+    except Exception:
+        return None
 
 
 def build_dn(components: dict[str, str]) -> str:
@@ -277,9 +381,7 @@ def format_error(message: str, code: str = "ERROR", status_code: int = 500) -> t
     return ({"status": "error", "code": code, "message": message}, status_code)
 
 
-def validate_required_fields(
-    data: dict[str, Any], required: list[str]
-) -> str | None:
+def validate_required_fields(data: dict[str, Any], required: list[str]) -> str | None:
     """Validate that required fields are present in data.
 
     Args:

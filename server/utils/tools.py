@@ -496,3 +496,275 @@ class RegistrationClient(ZMQClient):
         """
         response = self._send_message("status")
         return response.get("DATA", {})
+
+
+class ACMEClient(ZMQClient):
+    """ZMQ client for ACME operations with CA server.
+
+    This class provides methods for synchronizing ACME data (accounts, orders,
+    authorizations) with the CA server. It uses the standard operations port (5000).
+
+    Note: This client is not currently used but is implemented to define the
+    ZMQ message protocol for ACME synchronization with the CA.
+    """
+
+    # -------------------------------------------------------------------------
+    # Account Operations
+    # -------------------------------------------------------------------------
+
+    def sync_account(self, account_data: dict[str, Any]) -> bool:
+        """Synchronize ACME account with CA.
+
+        Args:
+            account_data: Account data including id, jwk, contact, status.
+
+        Returns:
+            True if synchronization was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "account_id": account_data.get("id", ""),
+            "jwk": account_data.get("jwk", {}),
+            "contact": account_data.get("contact", []),
+            "status": account_data.get("status", "valid"),
+            "created_at": account_data.get("created_at", ""),
+        }
+        response = self._send_message("acme_sync_account", params)
+        return response.get("DATA", False)
+
+    def get_account(self, account_id: str) -> dict[str, Any]:
+        """Get ACME account from CA.
+
+        Args:
+            account_id: The account identifier.
+
+        Returns:
+            Account data dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_get_account", {"account_id": account_id})
+        return response.get("DATA", {})
+
+    def list_accounts(self) -> list[dict[str, Any]]:
+        """List all ACME accounts in CA.
+
+        Returns:
+            List of account data dictionaries.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_list_accounts")
+        return response.get("DATA", [])
+
+    def deactivate_account(self, account_id: str) -> bool:
+        """Deactivate an ACME account.
+
+        Args:
+            account_id: The account identifier.
+
+        Returns:
+            True if deactivation was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message(
+            "acme_deactivate_account", {"account_id": account_id}
+        )
+        return response.get("DATA", False)
+
+    # -------------------------------------------------------------------------
+    # Order Operations
+    # -------------------------------------------------------------------------
+
+    def sync_order(self, order_data: dict[str, Any]) -> bool:
+        """Synchronize ACME order with CA.
+
+        Args:
+            order_data: Order data including id, account_id, identifiers, status.
+
+        Returns:
+            True if synchronization was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "order_id": order_data.get("id", ""),
+            "account_id": order_data.get("account_id", ""),
+            "identifiers": order_data.get("identifiers", []),
+            "status": order_data.get("status", "pending"),
+            "not_before": order_data.get("notBefore"),
+            "not_after": order_data.get("notAfter"),
+        }
+        response = self._send_message("acme_sync_order", params)
+        return response.get("DATA", False)
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        """Get ACME order from CA.
+
+        Args:
+            order_id: The order identifier.
+
+        Returns:
+            Order data dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_get_order", {"order_id": order_id})
+        return response.get("DATA", {})
+
+    def list_orders(self, account_id: str) -> list[dict[str, Any]]:
+        """List all ACME orders for an account.
+
+        Args:
+            account_id: The account identifier.
+
+        Returns:
+            List of order data dictionaries.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_list_orders", {"account_id": account_id})
+        return response.get("DATA", [])
+
+    # -------------------------------------------------------------------------
+    # Authorization Operations
+    # -------------------------------------------------------------------------
+
+    def sync_authorization(self, auth_data: dict[str, Any]) -> bool:
+        """Synchronize ACME authorization with CA.
+
+        Args:
+            auth_data: Authorization data including id, order_id, identifier, status.
+
+        Returns:
+            True if synchronization was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "auth_id": auth_data.get("id", ""),
+            "order_id": auth_data.get("order_id", ""),
+            "identifier_type": auth_data.get("type", "dns"),
+            "identifier_value": auth_data.get("value", ""),
+            "status": auth_data.get("status", "pending"),
+        }
+        response = self._send_message("acme_sync_authorization", params)
+        return response.get("DATA", False)
+
+    def get_authorization(self, auth_id: str) -> dict[str, Any]:
+        """Get ACME authorization from CA.
+
+        Args:
+            auth_id: The authorization identifier.
+
+        Returns:
+            Authorization data dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_get_authorization", {"auth_id": auth_id})
+        return response.get("DATA", {})
+
+    def deactivate_authorization(self, auth_id: str) -> bool:
+        """Deactivate an ACME authorization.
+
+        Args:
+            auth_id: The authorization identifier.
+
+        Returns:
+            True if deactivation was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message(
+            "acme_deactivate_authorization", {"auth_id": auth_id}
+        )
+        return response.get("DATA", False)
+
+    # -------------------------------------------------------------------------
+    # Certificate Operations
+    # -------------------------------------------------------------------------
+
+    def issue_certificate(
+        self, order_id: str, csr: str, profile: str = "server"
+    ) -> dict[str, Any]:
+        """Issue certificate for an ACME order.
+
+        Args:
+            order_id: The order identifier.
+            csr: Certificate Signing Request in PEM format.
+            profile: Certificate profile to use.
+
+        Returns:
+            Dictionary containing certificate and serial number.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "order_id": order_id,
+            "csr": csr,
+            "profile": profile,
+        }
+        response = self._send_message("acme_issue_certificate", params)
+        return response.get("DATA", {})
+
+    def get_certificate(self, cert_id: str) -> dict[str, Any]:
+        """Get certificate from CA.
+
+        Args:
+            cert_id: The certificate identifier (order_id or serial).
+
+        Returns:
+            Certificate data dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_get_certificate", {"cert_id": cert_id})
+        return response.get("DATA", {})
+
+    def revoke_acme_certificate(self, certificate: str, reason: int = 0) -> bool:
+        """Revoke a certificate.
+
+        Args:
+            certificate: Certificate in PEM format.
+            reason: Revocation reason code (default: 0 = unspecified).
+
+        Returns:
+            True if revocation was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "certificate": certificate,
+            "reason": reason,
+        }
+        response = self._send_message("acme_revoke_certificate", params)
+        return response.get("DATA", False)
