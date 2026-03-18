@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from cryptography.x509.oid import NameOID, ExtensionOID
+from cryptography.x509.oid import ExtensionOID, NameOID
 
 
 def ensure_directory(path: str) -> None:

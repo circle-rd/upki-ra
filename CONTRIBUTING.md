@@ -24,8 +24,8 @@ By participating in this project, you agree to maintain a respectful and inclusi
 ## Getting Started
 
 1. **Fork the repository** — Click the "Fork" button on GitHub to create your own copy
-2. **Clone your fork** — `git clone https://github.com/YOUR_USERNAME/upki.git`
-3. **Add upstream remote** — `git remote add upstream https://github.com/circle-rd/upki.git`
+2. **Clone your fork** — `git clone https://github.com/YOUR_USERNAME/upki-ra.git`
+3. **Add upstream remote** — `git remote add upstream https://github.com/circle-rd/upki-ra.git`
 4. **Create a branch** — `git checkout -b feature/your-feature-name`
 
 ## Development Environment
@@ -39,7 +39,7 @@ By participating in this project, you agree to maintain a respectful and inclusi
 
 ```bash
 # Clone the repository
-git clone https://github.com/circle-rd/upki.git
+git clone https://github.com/circle-rd/upki-ra.git
 cd upki
 
 # Create a virtual environment
@@ -91,19 +91,19 @@ We use the following tools to maintain code quality:
 Run linting:
 
 ```bash
-ruff check upki_ca/ tests/
+ruff check server/ tests/
 ```
 
 Run formatting:
 
 ```bash
-ruff format upki_ca/ tests/
+ruff format server/ tests/
 ```
 
 Run type checking (optional, for better IDE support):
 
 ```bash
-mypy upki_ca/
+mypy server/
 ```
 
 ### Naming Conventions
