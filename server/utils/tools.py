@@ -1,329 +1,770 @@
-# -*- coding:utf-8 -*-
+"""
+uPKI RA Server - ZMQ Tools Module.
 
-import re
-import sys
-import types
-import validators
+This module provides ZMQ client functionality for communicating with the CA server.
+It implements the CA-ZMQ protocol as defined in the protocol documentation.
+"""
 
-from .common import Common
+import json
+from typing import Any
 
-# if sys.version_info[0] == 3:
-#     STRING_TYPE = str,
-#     INTEGER_TYPE = int,
-#     CLASS_TYPE = type,
-#     TEXT_TYPE = str
-#     BINARY_TYPE = bytes
+import zmq
 
-#     MAXSIZE = sys.maxsize
-# else:
-#     STRING_TYPE = basestring,
-#     INTEGER_TYPE = (int, long)
-#     CLASS_TYPE = (type, types.ClassType)
-#     TEXT_TYPE = unicode
-#     BINARY_TYPE = str
-#     # It's possible to have sizeof(long) != sizeof(Py_ssize_t).
-#     class X(object):
-#         def __len__(self):
-#             return 1 << 31
-#     try:
-#         len(X())
-#     except OverflowError:
-#         # 32-bit
-#         MAXSIZE = int((1 << 31) - 1)
-#     else:
-#         # 64-bit
-#         MAXSIZE = int((1 << 63) - 1)
-#     del X
+from ..core.upki_error import CAConnectionError, UPKIError
+from ..core.upki_logger import UPKILogger
 
-class Tools(Common):
-    def __init__(self, logger):
-        try:
-            super(Tools, self).__init__(logger)
-        except Exception as err:
-            raise Exception(err)
 
-        self._fuzz   = False
-        self._email  = False
-        self._ca     = False
-        
-        # Define allowed values
-        self._profile_types = ['user','server','email']
-        self._fields = ['C','ST','L','O','OU','CN','emailAddress']
-        self.allowedType = [
-            "server",
-            "client",
-            "email",
-            "objsign",
-            "sslCA",
-            "emailCA"
-        ]
-        self.allowedUsage = [
-            "digitalSignature",
-            "nonRepudiation",
-            "keyEncipherment",
-            "dataEncipherment",
-            "keyAgreement",
-            "keyCertSign",
-            "cRLSign",
-            "encipherOnly",
-            "decipherOnly"
-        ]
-        self.allowedExtendedUsage = [
-            "serverAuth",
-            "clientAuth",
-            "codeSigning",
-            "emailProtection",
-            "timeStamping",
-            "OCSPSigning",
-            "ipsecIKE",
-            "msCodeInd",
-            "msCodeCom",
-            "msCTLSign",
-            "msEFS"
-        ]
+class ZMQClient:
+    """ZMQ client for communicating with the CA server.
 
-        self.allowed_digest  = ['md5','sha1','sha256','sha512']
-        self.allowed_keyLen  = [1024,2048,4096]
-        self.allowed_keyType = ['rsa','dsa']
+    This class implements the REQ/REP pattern for communicating with the CA server
+    via ZeroMQ. It handles connection management, message serialization, and error handling.
 
-        self.subject = []
+    Attributes:
+        host: CA server hostname or IP address.
+        port: CA server port number.
+        timeout: Request timeout in milliseconds.
+        logger: Logger instance for debugging.
+    """
 
-    def load_profile(self, name, data):
-        if name in ['ca','ra','admin']:
-            raise Exception('Sorry this name is reserved')
+    # Default CA server configuration
+    DEFAULT_HOST = "127.0.0.1"
+    DEFAULT_PORT = 5000
+    DEFAULT_TIMEOUT = 5000  # 5 seconds
 
-        if not (re.match('^[\w\-_\(\)]+$', name) is not None):
-            raise Exception('Invalid profile name')
+    def __init__(
+        self,
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_PORT,
+        timeout: int = DEFAULT_TIMEOUT,
+        logger: UPKILogger | None = None,
+    ) -> None:
+        """Initialize the ZMQ client.
 
-        self.output('Loading profile {p}'.format(p=name), level="DEBUG")
-        
-        try:
-            self.domain = data['domain']
-            if not validators.domain(data['domain']):
-                raise Exception('Domain is invalid')
-        except KeyError:
-            pass
-        try:
-            self.keyType = data['keyType']
-            if self.keyType not in self.allowed_keyType:
-                raise Exception('Unsupported key type')
-        except KeyError:
-            pass
-        try:
-            self.keyLen = int(data['keyLen'])
-            if self.keyLen not in self.allowed_keyLen:
-                raise Exception('Unsupported key length')
-        except KeyError:
-            pass
-        except ValueError:
-            pass
-        try:
-            self.version = data['version']
-        except KeyError:
-            self.version = 3
-        try:
-            self.duration = int(data['duration'])
-            if not validators.between(data['duration'],1,36500):
-                raise Exception('Duration is invalid')
-        except KeyError:
-            pass
-        except ValueError:
-            pass
-        try:
-            self.digest = data['digest']
-            if self.digest not in self.allowed_digest:
-                raise Exception('Unsupported digest algorithm')
-            if self.digest in ['md5','sha1']:
-                self.output('Note that {d} is now considered INSECURE !'.format(d=self.digest), level="WARNING")
-        except KeyError:
-            pass
-        try:
-            if not isinstance(data['keyUsage'], list):
-                raise Exception('Key usages values are incorrect')
-            self.keyUsage = data['keyUsage']
-            for usage in self.keyUsage:
-                if usage not in self.allowedUsage:
-                    raise Exception('Unsupported key usage')
-        except KeyError:
-            pass
-        try:
-            if not isinstance(data['extendedKeyUsage'], list):
-                raise Exception('Extended key usages values are incorrect')
-            self.extendedKeyUsage = data['extendedKeyUsage']
-            for usage in self.extendedKeyUsage:
-                if usage not in self.allowedExtendedUsage:
-                    raise Exception('Unsupported extended key usage')
-        except KeyError:
-            pass
-        try:
-            if not isinstance(data['certType'], list):
-                raise Exception('Certificate type values are incorrect')
-            self.certType = data['certType']
-            for ctype in self.certType:
-                if ctype not in self.allowedType:
-                    raise Exception('Unsupported certificate Type')
-        except KeyError:
-            pass
-        try:
-            self.crl = data['crl']
-        except KeyError:
-            pass
-        try:
-            self.ocsp = data['ocsp']
-        except KeyError:
-            pass
-        try:
-            if not isinstance(data['subject'], list):
-                raise Exception('Subject values are incorrect')
-            for item in data['subject']:
-                if not isinstance(item, dict):
-                    raise Exception('Subject entries are incorrect')
-                for (key, value) in item.items():
-                    break
-                if (key, value) not in self.subject:
-                    self.subject.append((key, value))
-        except KeyError:
-            pass
-        try:
-            self.altnames = data['altnames']
-        except KeyError:
-            pass
-
-        return data
-
-    # def to_bytes(self, obj, encoding='ascii'):
-    #     if isinstance(obj, BINARY_TYPE):
-    #         return obj
-
-    #     if isinstance(obj, TEXT_TYPE):
-    #         try:
-    #             return obj.encode(encoding)
-    #         except UnicodeEncodeError as err:
-    #             raise err
-    #     else:
-    #         # Convert to bytes array
-    #         b = bytearray()
-    #         return b.extend(str(obj))
-
-    def _get_dn(self, x509_obj, profile=None):
-        """Convert x509 subject object in standard string
+        Args:
+            host: CA server hostname or IP address (default: 127.0.0.1).
+            port: CA server port number (default: 5000).
+            timeout: Request timeout in milliseconds (default: 5000).
+            logger: Optional logger instance.
         """
-        dn = ''
-        if profile is None:
-            subject = x509_obj.get_subject()
-            for couple in subject.get_components():
-                value = '='.join(couple)
-                dn += '/{e}'.format(e=value)
-            return dn
-        
-        try:
-            data = self._storage.get_node(x509_obj, profile=profile)
-        except Exception as err:
-            raise Exception('Unable to get DN: {e}'.format(e=err))
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.logger = logger or UPKILogger(name="upki-ra-zmq")
+        self._socket: zmq.Socket | None = None
+        self._context: zmq.Context | None = None
 
-        dn = data['DN']
-        
-        return dn
+    @property
+    def connection_url(self) -> str:
+        """Get the ZMQ connection URL.
 
-    def _get_cn(self, dn):
-        """Retrieve the CN value from complete DN
-        perform validity check on CN found
+        Returns:
+            Connection URL in format tcp://host:port.
         """
-        try:
-            cn = str(dn).split('CN=')[1]
-        except Exception:
-            raise Exception('Unable to get CN from DN string')
+        return f"tcp://{self.host}:{self.port}"
 
-        # Ensure cn is valid
-        if (cn is None) or not len(cn):
-            raise Exception('Empty CN option')
-        if not (re.match('^[\w\-_\.@]+$', cn) is not None):
-            raise Exception('Invalid CN')
+    def _get_socket(self) -> zmq.Socket:
+        """Get or create a ZMQ socket.
 
-        return cn
+        Returns:
+            ZMQ socket instance.
 
-    def _check_node_params(self, params):
-        data = dict({})
-        try:
-            data['profile'] = params['Profile']
-        except KeyError:
-            raise Exception('Missing profile option')
+        Raises:
+            CAConnectionError: If socket creation fails.
+        """
+        if self._socket is None:
+            try:
+                self._context = zmq.Context()
+                self._socket = self._context.socket(zmq.REQ)
+                if self._socket is None:
+                    raise CAConnectionError("Failed to create ZMQ socket")
+                self._socket.setsockopt(zmq.RCVTIMEO, self.timeout)
+                self._socket.setsockopt(zmq.SNDTIMEO, self.timeout)
+                self._socket.connect(self.connection_url)
+                self.logger.debug(f"Connected to CA at {self.connection_url}")
+            except zmq.ZMQError as e:
+                self.logger.error(f"Failed to connect to CA: {e}")
+                raise CAConnectionError(f"Failed to connect to CA: {e}") from e
 
-        if data['profile'] not in self.profiles.keys():
-            raise Exception('Invalid profile type: {}'.format(self.profiles.keys()))
+        return self._socket
 
-        try:
-            data['dn'] = params['DN']
-        except KeyError:
-            raise Exception('Missing DN option')
+    def _send_message(
+        self, task: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Send a message to the CA server and wait for response.
 
-        try:
-            data['cn'] = params['CN']
-        except KeyError:
-            raise Exception('Missing CN option')
+        Args:
+            task: Task name to execute.
+            params: Optional parameters for the task.
 
-        try:
-            cn = self._get_cn(data['dn'])
-        except Exception as err:
-            raise Exception('Unable to find CN')
+        Returns:
+            Response dictionary from CA server.
 
-        if cn != data['cn']:
-            raise Exception('CN Mismatch')
-
-        try:
-            data['domain'] = params['Domain']
-        except KeyError:
-            raise Exception('Missing Domain option')
-
-        try:
-            data['keyType'] = params['KeyType']
-        except KeyError:
-            raise Exception('Missing Key Type option')
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error response.
+        """
+        message = {"TASK": task, "params": params or {}}
 
         try:
-            data['keyLen'] = params['KeyLen']
-        except KeyError:
-            raise Exception('Missing Key Length option')
+            socket = self._get_socket()
 
-        try:
-            data['duration'] = params['Duration']
-        except KeyError:
-            raise Exception('Missing Duration option')
+            # Send request
+            self.logger.debug(f"Sending task: {task} with params: {params}")
+            socket.send_string(json.dumps(message))
 
-        try:
-            data['digest'] = params['Digest']
-        except KeyError:
-            raise Exception('Missing Digest option')
+            # Receive response
+            response_str = socket.recv_string()
+            response = json.loads(response_str)
 
-        try:
-            data['sans'] = params['SANS']
-        except KeyError:
-            data['sans'] = []
+            self.logger.debug(f"Received response: {response}")
 
-        return data
+            # Check for error response
+            if response.get("EVENT") == "UPKI ERROR":
+                error_msg = response.get("MSG", "Unknown error")
+                raise UPKIError(error_msg)
 
-    # def _build_name(self, name):
-    #     if (self.domain is not None) and ('.' not in name):
-    #         if ('client' in self.certType) or ('email' in self.certType):
-    #             name = "{c}@{d}".format(c=name, d=self.domain)
-    #         else:
-    #             name = "{c}.{d}".format(c=name, d=self.domain)
+            return response
 
-    #     return name
+        except zmq.ZMQError as e:
+            self.logger.error(f"ZMQ error: {e}")
+            raise CAConnectionError(f"Communication with CA failed: {e}") from e
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON response: {e}")
+            raise CAConnectionError(f"Invalid response from CA: {e}") from e
 
-    def _build_sans(self, sans):
-        for i,s in enumerate(sans):
-            if validators.email(s):
-                sans[i] = "email:{s}".format(s=s)
-            elif validators.domain(s):
-                sans[i] = "DNS:{s}".format(s=s)
-            elif validators.url(s):
-                sans[i] = "URI:{s}".format(s=s)
-            elif validators.ipv4(s):
-                sans[i] = "IP:{s}".format(s=s)
-            else:
-                # sans[i] = "otherName:{s}".format(s=s)
-                # otherName is not supported by openssl by default
-                sans[i] = "DNS:{s}".format(s=s)
+    def close(self) -> None:
+        """Close the ZMQ connection."""
+        if self._socket:
+            self._socket.close()
+            self._socket = None
+        if self._context:
+            self._context.term()
+            self._context = None
+        self.logger.debug("ZMQ connection closed")
 
-        return ','.join(sans)
+    # -------------------------------------------------------------------------
+    # CA Operations
+    # -------------------------------------------------------------------------
+
+    def get_ca(self) -> str:
+        """Get CA certificate.
+
+        Returns:
+            CA certificate in PEM format.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("get_ca")
+        return response.get("DATA", "")
+
+    def get_crl(self) -> str:
+        """Get current CRL.
+
+        Returns:
+            CRL in base64-encoded DER format.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("get_crl")
+        return response.get("DATA", "")
+
+    def generate_crl(self) -> str:
+        """Generate new CRL.
+
+        Returns:
+            New CRL in base64-encoded DER format.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("generate_crl")
+        return response.get("DATA", "")
+
+    def list_profiles(self) -> dict[str, Any]:
+        """List available certificate profiles.
+
+        Returns:
+            Dictionary of available profiles.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("list_profiles")
+        return response.get("DATA", {})
+
+    def get_profile(self, profile_name: str) -> dict[str, Any]:
+        """Get details of a specific profile.
+
+        Args:
+            profile_name: Name of the profile to retrieve.
+
+        Returns:
+            Profile details dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("get_profile", {"profile": profile_name})
+        return response.get("DATA", {})
+
+    def sign_csr(self, csr: str, profile: str = "server") -> dict[str, Any]:
+        """Sign a CSR.
+
+        Args:
+            csr: CSR in PEM format.
+            profile: Certificate profile to use (default: server).
+
+        Returns:
+            Dictionary containing certificate and serial number.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("sign", {"csr": csr, "profile": profile})
+        return response.get("DATA", {})
+
+    def register_node(
+        self, seed: str, cn: str, profile: str = "ra", sans: list | None = None
+    ) -> dict[str, Any]:
+        """Register a new node.
+
+        Args:
+            seed: Registration seed for validation.
+            cn: Common Name for the node.
+            profile: Certificate profile (default: ra).
+            sans: Optional list of Subject Alternative Names.
+
+        Returns:
+            Dictionary containing registration details.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {"seed": seed, "cn": cn, "profile": profile}
+        if sans:
+            params["sans"] = sans
+
+        response = self._send_message("register", params)
+        return response.get("DATA", {})
+
+    def renew_certificate(self, dn: str) -> dict[str, Any]:
+        """Renew a certificate.
+
+        Args:
+            dn: Distinguished Name of the certificate to renew.
+
+        Returns:
+            Dictionary containing new certificate and serial number.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("renew", {"dn": dn})
+        return response.get("DATA", {})
+
+    def revoke_certificate(self, dn: str, reason: str = "unspecified") -> bool:
+        """Revoke a certificate.
+
+        Args:
+            dn: Distinguished Name of the certificate to revoke.
+            reason: Revocation reason (default: unspecified).
+
+        Returns:
+            True if revocation was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("revoke", {"dn": dn, "reason": reason})
+        return response.get("DATA", False)
+
+    def unrevoke_certificate(self, dn: str) -> bool:
+        """Unrevoke a certificate.
+
+        Args:
+            dn: Distinguished Name of the certificate to unrevoke.
+
+        Returns:
+            True if unrevocation was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("unrevoke", {"dn": dn})
+        return response.get("DATA", False)
+
+    def view_certificate(self, dn: str) -> dict[str, Any]:
+        """View certificate details.
+
+        Args:
+            dn: Distinguished Name of the certificate.
+
+        Returns:
+            Certificate details dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("view", {"dn": dn})
+        return response.get("DATA", {})
+
+    def ocsp_check(self, serial: str) -> dict[str, Any]:
+        """Check OCSP status of a certificate.
+
+        Args:
+            serial: Certificate serial number.
+
+        Returns:
+            OCSP status dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("ocsp_check", {"serial": serial})
+        return response.get("DATA", {})
+
+    # -------------------------------------------------------------------------
+    # Admin Operations
+    # -------------------------------------------------------------------------
+
+    def list_admins(self) -> list:
+        """List all administrators.
+
+        Returns:
+            List of administrator DNs.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("list_admins")
+        return response.get("DATA", [])
+
+    def add_admin(self, dn: str) -> bool:
+        """Add an administrator.
+
+        Args:
+            dn: Distinguished Name of the administrator.
+
+        Returns:
+            True if successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("add_admin", {"dn": dn})
+        return response.get("DATA", False)
+
+    def remove_admin(self, dn: str) -> bool:
+        """Remove an administrator.
+
+        Args:
+            dn: Distinguished Name of the administrator.
+
+        Returns:
+            True if successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("remove_admin", {"dn": dn})
+        return response.get("DATA", False)
+
+    # -------------------------------------------------------------------------
+    # Node Operations
+    # -------------------------------------------------------------------------
+
+    def list_nodes(self) -> list:
+        """List all nodes/certificates managed by the CA.
+
+        Returns:
+            List of node dictionaries with dn, cn, profile, state, serial.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("list_nodes")
+        return response.get("DATA", [])
+
+    def get_node(self, cn: str) -> dict[str, Any]:
+        """Get details of a specific node.
+
+        Args:
+            cn: Common Name of the node.
+
+        Returns:
+            Node details dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("get_node", {"cn": cn})
+        return response.get("DATA", {})
+
+    def delete_node(self, dn: str) -> bool:
+        """Delete a node/certificate.
+
+        Args:
+            dn: Distinguished Name of the node to delete.
+
+        Returns:
+            True if deletion was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("delete", {"dn": dn})
+        return response.get("DATA", False)
+
+
+class RegistrationClient(ZMQClient):
+    """ZMQ client for RA registration with CA server.
+
+    This class extends ZMQClient to use the registration endpoint (port 5001)
+    for initial RA registration.
+    """
+
+    # Registration endpoint uses port 5001
+    DEFAULT_PORT = 5001
+
+    def __init__(
+        self,
+        host: str = ZMQClient.DEFAULT_HOST,
+        timeout: int = ZMQClient.DEFAULT_TIMEOUT,
+        logger: UPKILogger | None = None,
+    ) -> None:
+        """Initialize the registration client.
+
+        Args:
+            host: CA server hostname or IP address.
+            timeout: Request timeout in milliseconds.
+            logger: Optional logger instance.
+        """
+        super().__init__(
+            host=host, port=self.DEFAULT_PORT, timeout=timeout, logger=logger
+        )
+
+    def register_ra(self, seed: str, cn: str, profile: str = "ra") -> dict[str, Any]:
+        """Register RA with CA server.
+
+        Args:
+            seed: Registration seed for validation.
+            cn: Common Name for the RA node.
+            profile: Certificate profile (default: ra).
+
+        Returns:
+            Registration response dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message(
+            "register", {"seed": seed, "cn": cn, "profile": profile}
+        )
+        return response.get("DATA", {})
+
+    def get_status(self) -> dict[str, Any]:
+        """Get registration status.
+
+        Returns:
+            Status dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("status")
+        return response.get("DATA", {})
+
+
+class ACMEClient(ZMQClient):
+    """ZMQ client for ACME operations with CA server.
+
+    This class provides methods for synchronizing ACME data (accounts, orders,
+    authorizations) with the CA server. It uses the standard operations port (5000).
+
+    Note: This client is not currently used but is implemented to define the
+    ZMQ message protocol for ACME synchronization with the CA.
+    """
+
+    # -------------------------------------------------------------------------
+    # Account Operations
+    # -------------------------------------------------------------------------
+
+    def sync_account(self, account_data: dict[str, Any]) -> bool:
+        """Synchronize ACME account with CA.
+
+        Args:
+            account_data: Account data including id, jwk, contact, status.
+
+        Returns:
+            True if synchronization was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "account_id": account_data.get("id", ""),
+            "jwk": account_data.get("jwk", {}),
+            "contact": account_data.get("contact", []),
+            "status": account_data.get("status", "valid"),
+            "created_at": account_data.get("created_at", ""),
+        }
+        response = self._send_message("acme_sync_account", params)
+        return response.get("DATA", False)
+
+    def get_account(self, account_id: str) -> dict[str, Any]:
+        """Get ACME account from CA.
+
+        Args:
+            account_id: The account identifier.
+
+        Returns:
+            Account data dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_get_account", {"account_id": account_id})
+        return response.get("DATA", {})
+
+    def list_accounts(self) -> list[dict[str, Any]]:
+        """List all ACME accounts in CA.
+
+        Returns:
+            List of account data dictionaries.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_list_accounts")
+        return response.get("DATA", [])
+
+    def deactivate_account(self, account_id: str) -> bool:
+        """Deactivate an ACME account.
+
+        Args:
+            account_id: The account identifier.
+
+        Returns:
+            True if deactivation was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message(
+            "acme_deactivate_account", {"account_id": account_id}
+        )
+        return response.get("DATA", False)
+
+    # -------------------------------------------------------------------------
+    # Order Operations
+    # -------------------------------------------------------------------------
+
+    def sync_order(self, order_data: dict[str, Any]) -> bool:
+        """Synchronize ACME order with CA.
+
+        Args:
+            order_data: Order data including id, account_id, identifiers, status.
+
+        Returns:
+            True if synchronization was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "order_id": order_data.get("id", ""),
+            "account_id": order_data.get("account_id", ""),
+            "identifiers": order_data.get("identifiers", []),
+            "status": order_data.get("status", "pending"),
+            "not_before": order_data.get("notBefore"),
+            "not_after": order_data.get("notAfter"),
+        }
+        response = self._send_message("acme_sync_order", params)
+        return response.get("DATA", False)
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        """Get ACME order from CA.
+
+        Args:
+            order_id: The order identifier.
+
+        Returns:
+            Order data dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_get_order", {"order_id": order_id})
+        return response.get("DATA", {})
+
+    def list_orders(self, account_id: str) -> list[dict[str, Any]]:
+        """List all ACME orders for an account.
+
+        Args:
+            account_id: The account identifier.
+
+        Returns:
+            List of order data dictionaries.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_list_orders", {"account_id": account_id})
+        return response.get("DATA", [])
+
+    # -------------------------------------------------------------------------
+    # Authorization Operations
+    # -------------------------------------------------------------------------
+
+    def sync_authorization(self, auth_data: dict[str, Any]) -> bool:
+        """Synchronize ACME authorization with CA.
+
+        Args:
+            auth_data: Authorization data including id, order_id, identifier, status.
+
+        Returns:
+            True if synchronization was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "auth_id": auth_data.get("id", ""),
+            "order_id": auth_data.get("order_id", ""),
+            "identifier_type": auth_data.get("type", "dns"),
+            "identifier_value": auth_data.get("value", ""),
+            "status": auth_data.get("status", "pending"),
+        }
+        response = self._send_message("acme_sync_authorization", params)
+        return response.get("DATA", False)
+
+    def get_authorization(self, auth_id: str) -> dict[str, Any]:
+        """Get ACME authorization from CA.
+
+        Args:
+            auth_id: The authorization identifier.
+
+        Returns:
+            Authorization data dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_get_authorization", {"auth_id": auth_id})
+        return response.get("DATA", {})
+
+    def deactivate_authorization(self, auth_id: str) -> bool:
+        """Deactivate an ACME authorization.
+
+        Args:
+            auth_id: The authorization identifier.
+
+        Returns:
+            True if deactivation was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message(
+            "acme_deactivate_authorization", {"auth_id": auth_id}
+        )
+        return response.get("DATA", False)
+
+    # -------------------------------------------------------------------------
+    # Certificate Operations
+    # -------------------------------------------------------------------------
+
+    def issue_certificate(
+        self, order_id: str, csr: str, profile: str = "server"
+    ) -> dict[str, Any]:
+        """Issue certificate for an ACME order.
+
+        Args:
+            order_id: The order identifier.
+            csr: Certificate Signing Request in PEM format.
+            profile: Certificate profile to use.
+
+        Returns:
+            Dictionary containing certificate and serial number.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "order_id": order_id,
+            "csr": csr,
+            "profile": profile,
+        }
+        response = self._send_message("acme_issue_certificate", params)
+        return response.get("DATA", {})
+
+    def get_certificate(self, cert_id: str) -> dict[str, Any]:
+        """Get certificate from CA.
+
+        Args:
+            cert_id: The certificate identifier (order_id or serial).
+
+        Returns:
+            Certificate data dictionary.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        response = self._send_message("acme_get_certificate", {"cert_id": cert_id})
+        return response.get("DATA", {})
+
+    def revoke_acme_certificate(self, certificate: str, reason: int = 0) -> bool:
+        """Revoke a certificate.
+
+        Args:
+            certificate: Certificate in PEM format.
+            reason: Revocation reason code (default: 0 = unspecified).
+
+        Returns:
+            True if revocation was successful.
+
+        Raises:
+            CAConnectionError: If communication fails.
+            UPKIError: If CA returns an error.
+        """
+        params = {
+            "certificate": certificate,
+            "reason": reason,
+        }
+        response = self._send_message("acme_revoke_certificate", params)
+        return response.get("DATA", False)

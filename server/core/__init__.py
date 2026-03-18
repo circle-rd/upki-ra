@@ -1,7 +1,39 @@
-from .upkiError import UPKIError
-from .phkLogger import PHKLogger
+"""
+uPKI RA Server - Core Module.
 
-__all__ = (
-    'UPKIError',
-    'PHKLogger'
+This module provides core functionality for the RA server including
+error handling and logging.
+"""
+
+from .upki_error import (
+    AuthenticationError,
+    AuthorizationError,
+    CAConnectionError,
+    CertificateError,
+    ConfigurationError,
+    ConflictError,
+    NotFoundError,
+    RegistrationError,
+    RevocationError,
+    UPKIError,
+    ValidationError,
 )
+from .upki_logger import UPKILogger, get_logger
+
+__all__ = [
+    # Error classes
+    "UPKIError",
+    "AuthenticationError",
+    "AuthorizationError",
+    "ValidationError",
+    "CAConnectionError",
+    "CertificateError",
+    "RegistrationError",
+    "ConfigurationError",
+    "NotFoundError",
+    "ConflictError",
+    "RevocationError",
+    # Logger
+    "UPKILogger",
+    "get_logger",
+]
