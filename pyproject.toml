@@ -23,7 +23,7 @@ fastapi = "^0.115.0"
 uvicorn = {extras = ["standard"], version = "^0.32.0"}
 pydantic = "^2.10.0"
 dnspython = "^2.6.0"  # For DNS-01 challenge validation
-cryptography = "^43.0.0"  # For certificate operations
+cryptography = "^46.0.5"  # For certificate operations
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
