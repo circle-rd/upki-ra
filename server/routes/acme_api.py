@@ -69,6 +69,7 @@ def _jwk_to_public_key(jwk: dict) -> Any:
         x = int.from_bytes(_base64url_decode(jwk["x"]), "big")
         y = int.from_bytes(_base64url_decode(jwk["y"]), "big")
 
+        ec_curve: ec.EllipticCurve
         if curve == "P-256":
             ec_curve = ec.SECP256R1()
         elif curve == "P-384":
@@ -241,7 +242,8 @@ def validate_acme_jws(
     if nonce:
         storage.remove_nonce(nonce)
 
-    return account_id, payload_data
+    # account_id could be None if not found but that's handled by earlier checks
+    return account_id or "", payload_data
 
 
 def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
@@ -395,7 +397,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """
         # Get the raw body (JWS format)
         jws_body = await request.body()
-        jws_str = jws_body.decode("utf-8") if isinstance(jws_body, bytes) else jws_body
+        jws_str = (
+            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
+        )
 
         # Validate JWS and get account ID
         account_id, body = validate_acme_jws(jws_str, storage)
@@ -816,9 +820,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         # Validate JWS and get account ID
         jws_body = await request.body()
         jws_str = (
-            jws_body.decode("utf-8")
-            if isinstance(jws_body, bytes | bytearray | memoryview)
-            else jws_body
+            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
         )
         account_id, body = validate_acme_jws(jws_str, storage)
 
@@ -899,9 +901,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         # but validates the signature
         jws_body = await request.body()
         jws_str = (
-            jws_body.decode("utf-8")
-            if isinstance(jws_body, bytes | bytearray | memoryview)
-            else jws_body
+            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
         )
         account_id, body = validate_acme_jws(jws_str, storage)
 
@@ -926,18 +926,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             # Build DN in RFC 4514 format
             subject_parts = []
             for attr in cert_obj.subject:
+                value = attr.value
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8")
                 if attr.oid == NameOID.COMMON_NAME:
-                    subject_parts.append(f"CN={attr.value}")
+                    subject_parts.append(f"CN={value}")
                 elif attr.oid == NameOID.ORGANIZATION_NAME:
-                    subject_parts.append(f"O={attr.value}")
+                    subject_parts.append(f"O={value}")
                 elif attr.oid == NameOID.ORGANIZATIONAL_UNIT_NAME:
-                    subject_parts.append(f"OU={attr.value}")
+                    subject_parts.append(f"OU={value}")
                 elif attr.oid == NameOID.COUNTRY_NAME:
-                    subject_parts.append(f"C={attr.value}")
+                    subject_parts.append(f"C={value}")
                 elif attr.oid == NameOID.STATE_OR_PROVINCE_NAME:
-                    subject_parts.append(f"ST={attr.value}")
+                    subject_parts.append(f"ST={value}")
                 elif attr.oid == NameOID.LOCALITY_NAME:
-                    subject_parts.append(f"L={attr.value}")
+                    subject_parts.append(f"L={value}")
             dn = "/" + "/".join(subject_parts) if subject_parts else "/CN=unknown"
         except Exception as e:
             ra.logger.warning(f"Failed to parse certificate for DN extraction: {e}")

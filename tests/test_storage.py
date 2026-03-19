@@ -8,6 +8,8 @@ import shutil
 import tempfile
 import unittest
 
+from pytest import fail
+
 from server.storage import SQLiteStorage
 
 
@@ -98,6 +100,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         retrieved = self.storage.get_account("account-123")
         self.assertIsNotNone(retrieved)
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["status"], "valid")
         self.assertEqual(retrieved["jwk"]["kty"], "RSA")
 
@@ -126,6 +130,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         # Verify the update
         retrieved = self.storage.get_account("account-123")
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["status"], "deactivated")
 
     def test_list_accounts(self):
@@ -174,6 +180,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         retrieved = self.storage.get_order("order-123")
         self.assertIsNotNone(retrieved)
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["status"], "pending")
 
     def test_get_nonexistent_order(self):
@@ -205,6 +213,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         # Verify the update
         retrieved = self.storage.get_order("order-123")
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["status"], "ready")
 
     def test_list_orders(self):
@@ -259,6 +269,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         retrieved = self.storage.get_authorization("auth-123")
         self.assertIsNotNone(retrieved)
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["status"], "pending")
 
     def test_get_nonexistent_authorization(self):
@@ -293,6 +305,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         # Verify the update
         retrieved = self.storage.get_authorization("auth-123")
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["status"], "valid")
 
     def test_list_authorizations(self):
@@ -358,6 +372,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         retrieved = self.storage.get_challenge("challenge-123")
         self.assertIsNotNone(retrieved)
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["type"], "http-01")
         self.assertEqual(retrieved["token"], "test-token")
 
@@ -387,6 +403,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         retrieved = self.storage.get_challenge_by_token("unique-test-token")
         self.assertIsNotNone(retrieved)
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["token"], "unique-test-token")
 
     def test_get_challenge_by_nonexistent_token(self):
@@ -426,6 +444,8 @@ class TestSQLiteStorage(unittest.TestCase):
 
         # Verify the update
         retrieved = self.storage.get_challenge("challenge-123")
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["status"], "valid")
 
     # ========================================================================
@@ -470,6 +490,8 @@ class TestStorageDataIntegrity(unittest.TestCase):
 
         # Retrieve and verify
         retrieved = self.storage.get_account("account-123")
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(retrieved["jwk"]["kty"], "RSA")
         self.assertEqual(retrieved["jwk"]["alg"], "RS256")
 
@@ -493,6 +515,8 @@ class TestStorageDataIntegrity(unittest.TestCase):
         self.storage.save_order("order-123", order_data)
 
         retrieved = self.storage.get_order("order-123")
+        if retrieved is None:
+            return fail("Failed to retrieve account")
         self.assertEqual(len(retrieved["identifiers"]), 2)
         self.assertEqual(len(retrieved["authorizations"]), 2)
 
