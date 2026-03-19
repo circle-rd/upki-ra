@@ -122,7 +122,8 @@ class RegistrationAuthority:
         Returns:
             The registration seed stored in config, or empty string if not registered.
         """
-        return self._config.get("seed", "")
+        seed = self._config.get("seed", "")
+        return seed if isinstance(seed, str) else ""
 
     def _load_config(self) -> None:
         """Load configuration from file."""

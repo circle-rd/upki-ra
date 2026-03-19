@@ -130,15 +130,17 @@ class TLSAuth:
         Returns:
             Dictionary of DN components (CN, O, OU, C, etc.).
         """
-        components = {}
+        components: dict[str, str | list[str]] = {}
         pattern = r"([A-Za-z]+)=([^,]+)"
 
         for match in re.finditer(pattern, dn):
             key, value = match.groups()
             if key in components:
-                if not isinstance(components[key], list):
-                    components[key] = [components[key]]
-                components[key].append(value)
+                existing = components[key]
+                if isinstance(existing, list):
+                    existing.append(value)
+                else:
+                    components[key] = [existing, value]
             else:
                 components[key] = value
 

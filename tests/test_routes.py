@@ -12,7 +12,7 @@ class TestRoutes(unittest.TestCase):
 
     def test_route_structure(self):
         """Test route module imports."""
-        from server.routes import (
+        from upki_ra.routes import (
             create_client_routes,
             create_private_routes,
             create_public_routes,
@@ -29,7 +29,7 @@ class TestAPIResponses(unittest.TestCase):
 
     def test_format_response_structure(self):
         """Test response format structure."""
-        from server.utils.common import format_response
+        from upki_ra.utils.common import format_response
 
         response = format_response(status="success", data={"key": "value"})
 
@@ -38,7 +38,7 @@ class TestAPIResponses(unittest.TestCase):
 
     def test_format_error_structure(self):
         """Test error format structure."""
-        from server.utils.common import format_error
+        from upki_ra.utils.common import format_error
 
         response, status_code = format_error(
             message="Test error", code="TEST_ERROR", status_code=400
@@ -58,8 +58,8 @@ class TestRegistrationAuthority(unittest.TestCase):
         import shutil
         import tempfile
 
-        from server.core import UPKILogger
-        from server.registration_authority import RegistrationAuthority
+        from upki_ra.core import UPKILogger
+        from upki_ra.registration_authority import RegistrationAuthority
 
         temp_dir = tempfile.mkdtemp()
 
@@ -81,8 +81,8 @@ class TestRegistrationAuthority(unittest.TestCase):
         import shutil
         import tempfile
 
-        from server.core import UPKILogger
-        from server.registration_authority import RegistrationAuthority
+        from upki_ra.core import UPKILogger
+        from upki_ra.registration_authority import RegistrationAuthority
 
         temp_dir = tempfile.mkdtemp()
 
@@ -101,8 +101,8 @@ class TestRegistrationAuthority(unittest.TestCase):
         import shutil
         import tempfile
 
-        from server.core import UPKILogger
-        from server.registration_authority import RegistrationAuthority
+        from upki_ra.core import UPKILogger
+        from upki_ra.registration_authority import RegistrationAuthority
 
         temp_dir = tempfile.mkdtemp()
 
@@ -122,8 +122,8 @@ class TestZMQClient(unittest.TestCase):
 
     def test_zmq_client_initialization(self):
         """Test ZMQ client can be initialized."""
-        from server.core import UPKILogger
-        from server.utils.tools import ZMQClient
+        from upki_ra.core import UPKILogger
+        from upki_ra.utils.tools import ZMQClient
 
         logger = UPKILogger(name="test-zmq")
         client = ZMQClient(host="127.0.0.1", port=5000, logger=logger)
@@ -134,7 +134,7 @@ class TestZMQClient(unittest.TestCase):
 
     def test_zmq_client_defaults(self):
         """Test ZMQ client default values."""
-        from server.utils.tools import ZMQClient
+        from upki_ra.utils.tools import ZMQClient
 
         client = ZMQClient()
 
@@ -144,7 +144,7 @@ class TestZMQClient(unittest.TestCase):
 
     def test_registration_client_defaults(self):
         """Test RegistrationClient default port."""
-        from server.utils.tools import RegistrationClient
+        from upki_ra.utils.tools import RegistrationClient
 
         client = RegistrationClient()
 
@@ -157,8 +157,8 @@ class TestTLSAuth(unittest.TestCase):
 
     def test_tls_auth_initialization(self):
         """Test TLS auth can be initialized."""
-        from server.core import UPKILogger
-        from server.utils.tlsauth import TLSAuth
+        from upki_ra.core import UPKILogger
+        from upki_ra.utils.tlsauth import TLSAuth
 
         logger = UPKILogger(name="test-tls")
         auth = TLSAuth(ca_cert="/path/to/ca.crt", logger=logger)
@@ -167,7 +167,7 @@ class TestTLSAuth(unittest.TestCase):
 
     def test_tls_auth_admin_dns(self):
         """Test admin DN management."""
-        from server.utils.tlsauth import TLSAuth
+        from upki_ra.utils.tlsauth import TLSAuth
 
         auth = TLSAuth()
 
@@ -182,7 +182,7 @@ class TestTLSAuth(unittest.TestCase):
 
     def test_is_admin(self):
         """Test admin authorization check."""
-        from server.utils.tlsauth import TLSAuth
+        from upki_ra.utils.tlsauth import TLSAuth
 
         auth = TLSAuth()
         auth.admin_dns = ["/C=US/O=Test/CN=admin1"]
@@ -195,7 +195,7 @@ class TestTLSAuth(unittest.TestCase):
 
     def test_extract_cn_from_dn(self):
         """Test CN extraction from DN."""
-        from server.utils.tlsauth import TLSAuth
+        from upki_ra.utils.tlsauth import TLSAuth
 
         auth = TLSAuth()
 

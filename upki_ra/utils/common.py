@@ -10,9 +10,9 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from cryptography.x509.oid import NameOID, ExtensionOID
+from cryptography.x509.oid import ExtensionOID, NameOID
 
 
 def ensure_directory(path: str) -> None:
@@ -77,7 +77,7 @@ def read_json_file(path: str) -> dict[str, Any] | None:
         return None
 
     try:
-        return json.loads(content)
+        return cast(dict[str, Any], json.loads(content))
     except json.JSONDecodeError:
         return None
 
@@ -178,7 +178,8 @@ def extract_cn_from_csr(csr: str) -> str | None:
         # Find the CN attribute
         for attribute in subject:
             if attribute.oid == NameOID.COMMON_NAME:
-                return attribute.value
+                value = attribute.value
+                return value.decode("utf-8") if isinstance(value, bytes) else value
 
         return None
 
@@ -211,17 +212,35 @@ def extract_subject_from_csr(csr: str) -> dict[str, str] | None:
 
         for attribute in subject:
             if attribute.oid == NameOID.COMMON_NAME:
-                result["CN"] = attribute.value
+                value = attribute.value
+                result["CN"] = (
+                    value.decode("utf-8") if isinstance(value, bytes) else value
+                )
             elif attribute.oid == NameOID.ORGANIZATION_NAME:
-                result["O"] = attribute.value
+                value = attribute.value
+                result["O"] = (
+                    value.decode("utf-8") if isinstance(value, bytes) else value
+                )
             elif attribute.oid == NameOID.ORGANIZATIONAL_UNIT_NAME:
-                result["OU"] = attribute.value
+                value = attribute.value
+                result["OU"] = (
+                    value.decode("utf-8") if isinstance(value, bytes) else value
+                )
             elif attribute.oid == NameOID.COUNTRY_NAME:
-                result["C"] = attribute.value
+                value = attribute.value
+                result["C"] = (
+                    value.decode("utf-8") if isinstance(value, bytes) else value
+                )
             elif attribute.oid == NameOID.STATE_OR_PROVINCE_NAME:
-                result["ST"] = attribute.value
+                value = attribute.value
+                result["ST"] = (
+                    value.decode("utf-8") if isinstance(value, bytes) else value
+                )
             elif attribute.oid == NameOID.LOCALITY_NAME:
-                result["L"] = attribute.value
+                value = attribute.value
+                result["L"] = (
+                    value.decode("utf-8") if isinstance(value, bytes) else value
+                )
 
         return result if result else None
 

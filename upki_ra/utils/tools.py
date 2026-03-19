@@ -250,7 +250,7 @@ class ZMQClient:
             CAConnectionError: If communication fails.
             UPKIError: If CA returns an error.
         """
-        params = {"seed": seed, "cn": cn, "profile": profile}
+        params: dict[str, Any] = {"seed": seed, "cn": cn, "profile": profile}
         if sans:
             params["sans"] = sans
 

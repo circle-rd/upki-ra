@@ -15,18 +15,16 @@ from base64 import b64decode, b64encode
 from datetime import datetime, timedelta
 from typing import Any
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.backends import default_backend
-from cryptography.x509 import load_pem_x509_certificate, load_pem_x509_csr
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.x509 import load_pem_x509_certificate
 from cryptography.x509.oid import NameOID
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from ..registration_authority import RegistrationAuthority
 from ..storage import AbstractStorage, SQLiteStorage
-from ..utils.common import format_response
-
 
 # ========================================================================
 # JWS Validation Functions (RFC 8555)
@@ -71,6 +69,7 @@ def _jwk_to_public_key(jwk: dict) -> Any:
         x = int.from_bytes(_base64url_decode(jwk["x"]), "big")
         y = int.from_bytes(_base64url_decode(jwk["y"]), "big")
 
+        ec_curve: ec.EllipticCurve
         if curve == "P-256":
             ec_curve = ec.SECP256R1()
         elif curve == "P-384":
@@ -113,7 +112,7 @@ def _verify_jws_signature(jws: str, public_key: Any, algorithm: str) -> bool:
     sig_bytes = _base64url_decode(signature)
 
     # Verify based on algorithm
-    sign_input = f"{protected}.{payload}".encode("utf-8")
+    sign_input = f"{protected}.{payload}".encode()
 
     if algorithm == "RS256":
         public_key.verify(sig_bytes, sign_input, padding.PKCS1v15(), hashes.SHA256())
@@ -166,8 +165,8 @@ def validate_acme_jws(
             protected_json = _base64url_decode(parts[0]).decode("utf-8")
             protected = json.loads(protected_json)
             payload = parts[1]
-        except Exception:
-            raise HTTPException(status_code=400, detail="malformed")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="malformed") from e
     else:
         # Already parsed - this shouldn't happen with current FastAPI
         raise HTTPException(status_code=400, detail="malformed")
@@ -222,13 +221,13 @@ def validate_acme_jws(
         public_key = _jwk_to_public_key(account_jwk)
         _verify_jws_signature(jws_payload, public_key, algorithm)
     except ValueError as e:
-        raise HTTPException(status_code=401, detail="unauthorized")
+        raise HTTPException(status_code=401, detail="unauthorized") from e
 
     # Decode payload
     try:
         payload_data = json.loads(_base64url_decode(payload).decode("utf-8"))
-    except Exception:
-        raise HTTPException(status_code=400, detail="malformed")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="malformed") from e
 
     # Validate nonce if provided
     nonce = protected.get("nonce")
@@ -243,7 +242,8 @@ def validate_acme_jws(
     if nonce:
         storage.remove_nonce(nonce)
 
-    return account_id, payload_data
+    # account_id could be None if not found but that's handled by earlier checks
+    return account_id or "", payload_data
 
 
 def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
@@ -327,8 +327,8 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """
         try:
             body = await request.json()
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from e
 
         # Check terms of service
         terms_agreed = body.get("termsOfServiceAgreed", False)
@@ -350,7 +350,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         # Check if account already exists
         existing_account = storage.get_account_by_jwk(jwk)
         if existing_account:
-            base_url = str(request.base_url).rstrip("/")
+            str(request.base_url).rstrip("/")
             return {
                 "status": "valid",
                 "contact": existing_account.get("contact", []),
@@ -369,7 +369,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         storage.save_account(account_id, account)
 
-        base_url = str(request.base_url).rstrip("/")
+        str(request.base_url).rstrip("/")
         return {
             "status": "valid",
             "contact": account["contact"],
@@ -397,7 +397,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """
         # Get the raw body (JWS format)
         jws_body = await request.body()
-        jws_str = jws_body.decode("utf-8") if isinstance(jws_body, bytes) else jws_body
+        jws_str = (
+            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
+        )
 
         # Validate JWS and get account ID
         account_id, body = validate_acme_jws(jws_str, storage)
@@ -524,9 +526,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             Challenge object with status.
         """
         try:
-            body = await request.json()
+            await request.json()
         except Exception:
-            body = {}
+            pass
 
         auth = storage.get_authorization(auth_id)
         if not auth:
@@ -724,7 +726,6 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                 raise ValueError("No key authorization set")
 
             # Try to resolve DNS TXT record
-            import socket
 
             # Simple DNS resolution - try to get TXT records
             # In production, use dnspython for proper DNSsec validation
@@ -760,7 +761,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             # Update storage
             storage.update_authorization(auth_id, auth)
 
-        except Exception as e:
+        except Exception:
             # Mark as invalid on error
             dns01_challenge["status"] = "invalid"
             auth["status"] = "invalid"
@@ -819,9 +820,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         # Validate JWS and get account ID
         jws_body = await request.body()
         jws_str = (
-            jws_body.decode("utf-8")
-            if isinstance(jws_body, (bytes, bytearray, memoryview))
-            else jws_body
+            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
         )
         account_id, body = validate_acme_jws(jws_str, storage)
 
@@ -853,8 +852,8 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         # Decode and validate CSR
         try:
             csr_bytes = b64decode(csr)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid CSR encoding")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="Invalid CSR encoding") from e
 
         # Sign CSR using CA via ZMQ
         try:
@@ -867,7 +866,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             ra.logger.error(f"Failed to sign CSR: {e}")
             raise HTTPException(
                 status_code=500, detail="Failed to sign certificate request"
-            )
+            ) from e
 
         # Update order status
         order["status"] = "valid"
@@ -902,9 +901,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         # but validates the signature
         jws_body = await request.body()
         jws_str = (
-            jws_body.decode("utf-8")
-            if isinstance(jws_body, (bytes, bytearray, memoryview))
-            else jws_body
+            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
         )
         account_id, body = validate_acme_jws(jws_str, storage)
 
@@ -917,8 +914,10 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         # Decode certificate
         try:
             cert_bytes = b64decode(certificate)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid certificate encoding")
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail="Invalid certificate encoding"
+            ) from e
 
         # Extract DN from certificate for revocation
         try:
@@ -927,18 +926,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             # Build DN in RFC 4514 format
             subject_parts = []
             for attr in cert_obj.subject:
+                value = attr.value
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8")
                 if attr.oid == NameOID.COMMON_NAME:
-                    subject_parts.append(f"CN={attr.value}")
+                    subject_parts.append(f"CN={value}")
                 elif attr.oid == NameOID.ORGANIZATION_NAME:
-                    subject_parts.append(f"O={attr.value}")
+                    subject_parts.append(f"O={value}")
                 elif attr.oid == NameOID.ORGANIZATIONAL_UNIT_NAME:
-                    subject_parts.append(f"OU={attr.value}")
+                    subject_parts.append(f"OU={value}")
                 elif attr.oid == NameOID.COUNTRY_NAME:
-                    subject_parts.append(f"C={attr.value}")
+                    subject_parts.append(f"C={value}")
                 elif attr.oid == NameOID.STATE_OR_PROVINCE_NAME:
-                    subject_parts.append(f"ST={attr.value}")
+                    subject_parts.append(f"ST={value}")
                 elif attr.oid == NameOID.LOCALITY_NAME:
-                    subject_parts.append(f"L={attr.value}")
+                    subject_parts.append(f"L={value}")
             dn = "/" + "/".join(subject_parts) if subject_parts else "/CN=unknown"
         except Exception as e:
             ra.logger.warning(f"Failed to parse certificate for DN extraction: {e}")
@@ -953,7 +955,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                 )
         except Exception as e:
             ra.logger.error(f"Failed to revoke certificate: {e}")
-            raise HTTPException(status_code=500, detail="Failed to revoke certificate")
+            raise HTTPException(
+                status_code=500, detail="Failed to revoke certificate"
+            ) from e
 
         return {"status": "revoked"}
 

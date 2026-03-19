@@ -9,7 +9,9 @@ import shutil
 import tempfile
 import unittest
 
-from server.utils.common import (
+from pytest import fail
+
+from upki_ra.utils.common import (
     build_dn,
     compute_sha256,
     decode_base64,
@@ -29,7 +31,7 @@ from server.utils.common import (
     write_file,
     write_json_file,
 )
-from server.utils.tlsauth import CertificateValidator
+from upki_ra.utils.tlsauth import CertificateValidator
 
 
 class TestCommonUtils(unittest.TestCase):
@@ -113,6 +115,8 @@ HQYDVR0OBBYEFH9YJ9YJ9YJ9YJ9YJ9YJ9YJ9YMB8GA1UdIwQYMBaAFH9YJ9YJ
 
         result = parse_pem(pem, "CERTIFICATE")
         self.assertIsNotNone(result)
+        if result is None:
+            return fail("Failed to parse PEM")
         self.assertEqual(len(result), 1)
         self.assertIn("-----BEGIN CERTIFICATE-----", result[0])
 
@@ -185,6 +189,9 @@ HQYDVR0OBBYEFH9YJ9YJ9YJ9YJ9YJ9YJ9YJ9YMB8GA1UdIwQYMBaAFH9YJ9YJ
 
         error = validate_required_fields(data, ["field1", "field3"])
         self.assertIsNotNone(error)
+        if error is None:
+            return fail("Failed to validate required fields")
+
         self.assertIn("field3", error)
 
     def test_sanitize_filename(self):

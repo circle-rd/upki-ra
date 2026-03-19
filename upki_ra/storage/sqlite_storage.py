@@ -54,12 +54,6 @@ class SQLiteStorage(AbstractStorage):
             self._connection.execute("PRAGMA foreign_keys=ON")
         return self._connection
 
-    def close(self) -> None:
-        """Close the database connection."""
-        if self._connection is not None:
-            self._connection.close()
-            self._connection = None
-
     def __enter__(self) -> "SQLiteStorage":
         """Context manager entry."""
         return self
