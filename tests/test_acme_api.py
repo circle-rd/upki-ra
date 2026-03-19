@@ -13,7 +13,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
-from server.routes.acme_api import (
+from upki_ra.routes.acme_api import (
     _base64url_decode,
     _base64url_encode,
     _jwk_to_public_key,

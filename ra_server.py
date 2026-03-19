@@ -20,9 +20,9 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from server.core import UPKIError, get_logger
-from server.registration_authority import RegistrationAuthority
-from server.routes import (
+from upki_ra.core import UPKIError, get_logger
+from upki_ra.registration_authority import RegistrationAuthority
+from upki_ra.routes import (
     create_acme_routes,
     create_client_routes,
     create_private_routes,

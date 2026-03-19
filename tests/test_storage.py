@@ -10,7 +10,7 @@ import unittest
 
 from pytest import fail
 
-from server.storage import SQLiteStorage
+from upki_ra.storage import SQLiteStorage
 
 
 class TestSQLiteStorage(unittest.TestCase):

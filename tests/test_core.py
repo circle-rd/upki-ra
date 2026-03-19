@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import unittest
 
-from server.core.upki_error import (
+from upki_ra.core.upki_error import (
     AuthenticationError,
     AuthorizationError,
     CAConnectionError,
@@ -23,7 +23,7 @@ from server.core.upki_error import (
     UPKIError,
     ValidationError,
 )
-from server.core.upki_logger import UPKILogger, get_logger
+from upki_ra.core.upki_logger import UPKILogger, get_logger
 
 
 class TestUPKIError(unittest.TestCase):

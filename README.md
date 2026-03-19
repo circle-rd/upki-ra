@@ -173,7 +173,7 @@ upki-ra/
 │   ├── CA_ZMQ_PROTOCOL.md
 │   ├── SPECIFICATIONS_RA.md
 │   └── SPECIFICATIONS_CA.md
-├── server/
+├── upki_ra/
 │   ├── __init__.py
 │   ├── registration_authority.py   # Core RA class
 │   ├── core/
