@@ -10,6 +10,7 @@ import tempfile
 import unittest
 
 from pytest import fail
+
 from upki_ra.utils.common import (
     build_dn,
     compute_sha256,
