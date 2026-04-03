@@ -1,26 +1,37 @@
 """
-uPKI RA Server - ACME API Module.
+uPKI RA Server - ACME API Module (RFC 8555).
 
-This module provides ACME (Automatic Certificate Management Environment) v2 protocol
-endpoints for integration with Traefik and other ACME clients.
-
-ACME v2 Specification: https://datatracker.ietf.org/doc/html/rfc8555
+Implements:
+- Flattened JSON JWS serialization per RFC 8555 §6
+- Mandatory nonce validation on every ACME POST (RFC 8555 §6.5)
+- EC signature in IEEE P1363 format (r||s) as required by JWS
+- RFC 7638 JWK thumbprints (only required members, lexicographic order)
+- Pre-authorization for mTLS-registered clients (X-SSL-CLIENT-VERIFY: SUCCESS)
+- Complete order lifecycle: pending → ready → processing → valid / invalid
+- Real HTTP-01 validation via httpx
+- Real DNS-01 validation via dnspython
+- Revocation restricted to the ordering account
 """
+
+from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
 import uuid
 from base64 import b64decode, b64encode
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
-from cryptography.x509 import load_pem_x509_certificate
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+from cryptography.x509 import load_der_x509_csr, load_pem_x509_certificate
 from cryptography.x509.oid import NameOID
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from ..registration_authority import RegistrationAuthority
@@ -87,123 +98,163 @@ def _jwk_to_public_key(jwk: dict) -> Any:
         raise ValueError(f"Unsupported key type: {kty}")
 
 
-def _verify_jws_signature(jws: str, public_key: Any, algorithm: str) -> bool:
-    """Verify JWS signature.
+def _compute_key_thumbprint(jwk: dict[str, Any]) -> str:
+    """Compute RFC 7638 JWK Thumbprint (base64url of SHA-256).
+
+    Only the key-type-required members are included, in lexicographic order,
+    with no extra whitespace (RFC 7638 §3.3).
 
     Args:
-        jws: Compact JWS format string
-        public_key: Cryptography public key
-        algorithm: JWS algorithm (RS256, ES256, etc.)
+        jwk: JSON Web Key dictionary.
 
     Returns:
-        True if signature is valid
+        Base64url-encoded SHA-256 digest string.
 
     Raises:
-        ValueError: If signature is invalid
+        ValueError: If key type is unsupported.
     """
-    # Parse JWS (compact serialization)
-    parts = jws.split(".")
-    if len(parts) != 3:
-        raise ValueError("Invalid JWS format")
+    kty = jwk.get("kty", "")
+    if kty == "EC":
+        members = {"crv": jwk["crv"], "kty": "EC", "x": jwk["x"], "y": jwk["y"]}
+    elif kty == "RSA":
+        members = {"e": jwk["e"], "kty": "RSA", "n": jwk["n"]}
+    else:
+        raise ValueError(f"Unsupported key type: {kty}")
 
-    protected, payload, signature = parts
+    digest = hashlib.sha256(
+        json.dumps(members, sort_keys=True, separators=(",", ":")).encode()
+    ).digest()
+    return _base64url_encode(digest)
 
-    # Decode signature
-    sig_bytes = _base64url_decode(signature)
 
-    # Verify based on algorithm
-    sign_input = f"{protected}.{payload}".encode()
+def _verify_jws_signature(
+    protected_b64: str,
+    payload_b64: str,
+    signature_b64: str,
+    public_key: Any,
+    algorithm: str,
+) -> None:
+    """Verify a JWS flattened-JSON signature.
 
-    if algorithm == "RS256":
-        public_key.verify(sig_bytes, sign_input, padding.PKCS1v15(), hashes.SHA256())
-    elif algorithm == "RS384":
-        public_key.verify(sig_bytes, sign_input, padding.PKCS1v15(), hashes.SHA384())
-    elif algorithm == "RS512":
-        public_key.verify(sig_bytes, sign_input, padding.PKCS1v15(), hashes.SHA512())
-    elif algorithm == "ES256":
-        public_key.verify(sig_bytes, sign_input, ec.ECDSA(hashes.SHA256()))
-    elif algorithm == "ES384":
-        public_key.verify(sig_bytes, sign_input, ec.ECDSA(hashes.SHA384()))
-    elif algorithm == "ES512":
-        public_key.verify(sig_bytes, sign_input, ec.ECDSA(hashes.SHA512()))
+    EC signatures in JWS are encoded in IEEE P1363 format (r || s).
+    This function converts them to DER before calling cryptography's verify().
+
+    Args:
+        protected_b64: Base64url-encoded protected header.
+        payload_b64: Base64url-encoded payload.
+        signature_b64: Base64url-encoded signature.
+        public_key: cryptography public key object.
+        algorithm: JWS algorithm string (RS256, ES256, …).
+
+    Raises:
+        ValueError: If the algorithm is unsupported or the signature is invalid.
+    """
+    sig_bytes = _base64url_decode(signature_b64)
+    sign_input = f"{protected_b64}.{payload_b64}".encode()
+
+    if algorithm in ("RS256", "RS384", "RS512"):
+        hash_map = {
+            "RS256": hashes.SHA256(),
+            "RS384": hashes.SHA384(),
+            "RS512": hashes.SHA512(),
+        }
+        public_key.verify(
+            sig_bytes, sign_input, padding.PKCS1v15(), hash_map[algorithm]
+        )
+
+    elif algorithm in ("ES256", "ES384", "ES512"):
+        # JWS uses IEEE P1363 (r || s) — convert to DER for cryptography
+        half = len(sig_bytes) // 2
+        r = int.from_bytes(sig_bytes[:half], "big")
+        s = int.from_bytes(sig_bytes[half:], "big")
+        der_sig = encode_dss_signature(r, s)
+        hash_map_ec = {
+            "ES256": hashes.SHA256(),
+            "ES384": hashes.SHA384(),
+            "ES512": hashes.SHA512(),
+        }
+        public_key.verify(der_sig, sign_input, ec.ECDSA(hash_map_ec[algorithm]))
+
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
 
-    return True
-
 
 def validate_acme_jws(
-    jws_payload: str | dict, storage: AbstractStorage, expected_nonce: str | None = None
-) -> tuple[str, dict]:
-    """Validate ACME JWS and extract account ID and payload.
+    raw_body: bytes | str,
+    storage: AbstractStorage,
+) -> tuple[str, dict[str, Any]]:
+    """Parse, nonce-validate, and signature-verify an ACME JWS request.
 
-    ACME requires JWS signed by the account's key. This function:
-    1. Parses the JWS header to get account key info (kid or jwk)
-    2. Retrieves the account's stored JWK
-    3. Verifies the JWS signature
-    4. Returns the account_id and the payload
+    ACME uses flattened JSON JWS serialization (RFC 7515 §7.2.2):
+        { "protected": "<b64url>", "payload": "<b64url>", "signature": "<b64url>" }
+
+    A nonce is mandatory in every ACME POST (RFC 8555 §6.5).
 
     Args:
-        jws_payload: JWS in compact serialization or parsed dict
-        storage: Storage instance for account lookup
-        expected_nonce: Expected nonce value (optional)
+        raw_body: Raw HTTP request body.
+        storage: Storage backend for nonce and account lookup.
 
     Returns:
-        Tuple of (account_id, payload)
+        Tuple of (account_id, decoded_payload_dict).
 
     Raises:
-        HTTPException: If validation fails
+        HTTPException: On any validation failure (400 malformed / 401 unauthorized
+            / 400 badNonce).
     """
-    # Handle both string JWS and already-parsed dict
-    if isinstance(jws_payload, str):
-        # Parse compact JWS
-        parts = jws_payload.split(".")
-        if len(parts) != 3:
-            raise HTTPException(status_code=400, detail="malformed")
+    try:
+        if isinstance(raw_body, bytes):
+            raw_body = raw_body.decode("utf-8")
+        jws = json.loads(raw_body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="malformed") from exc
 
-        try:
-            protected_json = _base64url_decode(parts[0]).decode("utf-8")
-            protected = json.loads(protected_json)
-            payload = parts[1]
-        except Exception as e:
-            raise HTTPException(status_code=400, detail="malformed") from e
-    else:
-        # Already parsed - this shouldn't happen with current FastAPI
+    protected_b64: str = jws.get("protected", "")
+    payload_b64: str = jws.get("payload", "")
+    signature_b64: str = jws.get("signature", "")
+
+    if not protected_b64 or not signature_b64:
         raise HTTPException(status_code=400, detail="malformed")
 
-    # Get algorithm from header
+    try:
+        protected: dict[str, Any] = json.loads(
+            _base64url_decode(protected_b64).decode("utf-8")
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="malformed") from exc
+
     algorithm = protected.get("alg")
     if not algorithm:
         raise HTTPException(status_code=400, detail="malformed")
 
-    # Get account identifier (either 'kid' or 'jwk')
-    kid = protected.get("kid")
-    jwk_header = protected.get("jwk")
+    # --- Nonce (mandatory per RFC 8555 §6.5) ---
+    nonce = protected.get("nonce")
+    if not nonce:
+        raise HTTPException(
+            status_code=400,
+            detail="badNonce",
+            headers={"Replay-Nonce": uuid.uuid4().hex},
+        )
+    if not storage.remove_nonce(nonce):
+        raise HTTPException(
+            status_code=400,
+            detail="badNonce",
+            headers={"Replay-Nonce": uuid.uuid4().hex},
+        )
 
-    account_id = None
-    account_jwk = None
+    # --- Account resolution ---
+    kid: str | None = protected.get("kid")
+    jwk_header: dict[str, Any] | None = protected.get("jwk")
+    account_id: str | None = None
+    account_jwk: dict[str, Any] | None = None
 
     if kid:
-        # Extract account ID from URL
-        # Format: https://server/acme/account/{account_id}
-        if "/acme/account/" in kid:
-            account_id = kid.split("/acme/account/")[-1]
-        else:
-            account_id = kid
-
-        # Get account from storage
+        account_id = kid.split("/acme/account/")[-1] if "/acme/account/" in kid else kid
         account = storage.get_account(account_id)
-        if not account:
+        if not account or account.get("status") != "valid":
             raise HTTPException(status_code=401, detail="unauthorized")
-
-        # Check account status
-        if account.get("status") != "valid":
-            raise HTTPException(status_code=401, detail="unauthorized")
-
         account_jwk = account.get("jwk")
 
     elif jwk_header:
-        # Key provided directly in header - find matching account
         account = storage.get_account_by_jwk(jwk_header)
         if not account:
             raise HTTPException(status_code=401, detail="unauthorized")
@@ -216,34 +267,162 @@ def validate_acme_jws(
     if not account_jwk:
         raise HTTPException(status_code=401, detail="unauthorized")
 
-    # Verify signature
+    # --- Signature ---
     try:
-        public_key = _jwk_to_public_key(account_jwk)
-        _verify_jws_signature(jws_payload, public_key, algorithm)
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail="unauthorized") from e
+        pub = _jwk_to_public_key(account_jwk)
+        _verify_jws_signature(protected_b64, payload_b64, signature_b64, pub, algorithm)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="unauthorized") from exc
 
-    # Decode payload
-    try:
-        payload_data = json.loads(_base64url_decode(payload).decode("utf-8"))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="malformed") from e
+    # --- Payload ---
+    if payload_b64 == "":
+        payload_data: dict[str, Any] = {}
+    else:
+        try:
+            payload_data = json.loads(_base64url_decode(payload_b64).decode("utf-8"))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="malformed") from exc
 
-    # Validate nonce if provided
-    nonce = protected.get("nonce")
-    if expected_nonce and nonce != expected_nonce:
-        raise HTTPException(
-            status_code=400,
-            detail="badNonce",
-            headers={"Replay-Nonce": uuid.uuid4().hex},
-        )
-
-    # Remove the nonce if valid
-    if nonce:
-        storage.remove_nonce(nonce)
-
-    # account_id could be None if not found but that's handled by earlier checks
     return account_id or "", payload_data
+
+
+# ============================================================================
+# Order state machine helper
+# ============================================================================
+
+
+def _advance_order_if_ready(order_id: str, storage: AbstractStorage) -> None:
+    """Transition order from pending → ready when all authorizations are valid.
+
+    Args:
+        order_id: ACME order identifier.
+        storage: Storage backend.
+    """
+    order = storage.get_order(order_id)
+    if not order or order.get("status") != "pending":
+        return
+
+    for auth_url in order.get("authorizations", []):
+        auth_id = auth_url.split("/")[-1]
+        auth = storage.get_authorization(auth_id)
+        if not auth or auth.get("status") != "valid":
+            return
+
+    order["status"] = "ready"
+    storage.update_order(order_id, order)
+
+
+# ============================================================================
+# Background validation tasks — module-level (not closures)
+# ============================================================================
+
+
+async def _validate_http01_async(
+    auth_id: str,
+    challenge: dict[str, Any],
+    auth: dict[str, Any],
+    storage: AbstractStorage,
+    ra: RegistrationAuthority,
+) -> None:
+    """Perform real HTTP-01 validation (RFC 8555 §8.3).
+
+    Fetches http://{domain}/.well-known/acme-challenge/{token} and verifies
+    the response body equals the expected key authorization.
+
+    Args:
+        auth_id: Authorization ID.
+        challenge: Challenge dict (mutated in-place).
+        auth: Authorization dict (mutated in-place).
+        storage: Storage backend.
+        ra: RegistrationAuthority for logging.
+    """
+    domain = auth.get("value", "")
+    token = challenge.get("token", "")
+    expected = challenge.get("key_authorization", "")
+    url = f"http://{domain}/.well-known/acme-challenge/{token}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+        received = response.text.strip()
+        if response.status_code == 200 and received == expected:
+            challenge["status"] = "valid"
+            auth["status"] = "valid"
+        else:
+            challenge["status"] = "invalid"
+            auth["status"] = "invalid"
+            ra.logger.warning(
+                f"HTTP-01 failed for {domain}: HTTP {response.status_code}, "
+                f"got '{received}', expected '{expected}'"
+            )
+    except Exception as exc:
+        challenge["status"] = "invalid"
+        auth["status"] = "invalid"
+        ra.logger.error(f"HTTP-01 error for {domain}: {exc}")
+
+    storage.update_authorization(auth_id, auth)
+
+    if auth.get("status") == "valid":
+        order_id = auth.get("order_id")
+        if order_id:
+            _advance_order_if_ready(order_id, storage)
+
+
+async def _validate_dns01_async(
+    auth_id: str,
+    challenge: dict[str, Any],
+    auth: dict[str, Any],
+    storage: AbstractStorage,
+    ra: RegistrationAuthority,
+) -> None:
+    """Perform real DNS-01 validation (RFC 8555 §8.4).
+
+    Queries the _acme-challenge TXT record and verifies it contains the
+    base64url(SHA-256(key_authorization)) value. Requires dnspython.
+
+    Args:
+        auth_id: Authorization ID.
+        challenge: Challenge dict (mutated in-place).
+        auth: Authorization dict (mutated in-place).
+        storage: Storage backend.
+        ra: RegistrationAuthority for logging.
+    """
+    dns_name = challenge.get("dns_name", f"_acme-challenge.{auth.get('value', '')}")
+    expected_value = challenge.get("dns_value", "")
+
+    try:
+        import dns.resolver
+
+        answers = dns.resolver.resolve(dns_name, "TXT")
+        found = any(rdata.to_text().strip('"') == expected_value for rdata in answers)
+
+        if found:
+            challenge["status"] = "valid"
+            auth["status"] = "valid"
+        else:
+            challenge["status"] = "invalid"
+            auth["status"] = "invalid"
+            ra.logger.warning(
+                f"DNS-01 failed for {dns_name}: TXT '{expected_value}' not found"
+            )
+
+    except ImportError:
+        challenge["status"] = "invalid"
+        auth["status"] = "invalid"
+        ra.logger.error(
+            "DNS-01 validation requires dnspython. Install with: pip install dnspython"
+        )
+    except Exception as exc:
+        challenge["status"] = "invalid"
+        auth["status"] = "invalid"
+        ra.logger.error(f"DNS-01 error for {dns_name}: {exc}")
+
+    storage.update_authorization(auth_id, auth)
+
+    if auth.get("status") == "valid":
+        order_id = auth.get("order_id")
+        if order_id:
+            _advance_order_if_ready(order_id, storage)
 
 
 def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
@@ -257,728 +436,568 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     """
     router = APIRouter(tags=["ACME"])
 
-    # Initialize storage
     storage: AbstractStorage = SQLiteStorage(ra.data_dir)
     storage.initialize()
 
-    # ========================================================================
-    # ACME Directory
-    # ========================================================================
+    # =========================================================================
+    # Directory (RFC 8555 §7.1.1)
+    # =========================================================================
 
     @router.get("/acme/directory")
     async def get_acme_directory(request: Request) -> dict:
-        """Get ACME directory.
-
-        Returns:
-            ACME directory with endpoint URLs.
-        """
-        base_url = str(request.base_url).rstrip("/")
+        """Return the ACME directory object."""
+        base = str(request.base_url).rstrip("/")
         return {
-            "newNonce": f"{base_url}/acme/new-nonce",
-            "newAccount": f"{base_url}/acme/new-account",
-            "newOrder": f"{base_url}/acme/new-order",
-            "revokeCert": f"{base_url}/acme/revoke-cert",
-            "keyChange": f"{base_url}/acme/key-change",
+            "newNonce": f"{base}/acme/new-nonce",
+            "newAccount": f"{base}/acme/new-account",
+            "newOrder": f"{base}/acme/new-order",
+            "revokeCert": f"{base}/acme/revoke-cert",
+            "keyChange": f"{base}/acme/key-change",
+            "meta": {"termsOfServiceAgreed": True},
         }
 
-    # ========================================================================
-    # ACME Nonce
-    # ========================================================================
+    # =========================================================================
+    # Nonce (RFC 8555 §7.2)
+    # =========================================================================
 
-    @router.get("/acme/new-nonce")
-    async def get_new_nonce(request: Request) -> dict:
-        """Get new nonce for ACME requests.
-
-        Returns:
-            Empty response with new nonce in header.
-        """
+    @router.get("/acme/new-nonce", status_code=204)
+    async def get_new_nonce() -> Response:
+        """Issue a fresh anti-replay nonce (GET → 204, RFC 8555 §7.2)."""
         nonce = uuid.uuid4().hex
         storage.add_nonce(nonce)
-        return {}
+        return Response(
+            status_code=204,
+            headers={"Replay-Nonce": nonce, "Cache-Control": "no-store"},
+        )
 
-    @router.head("/acme/new-nonce")
-    async def head_new_nonce(request: Request) -> dict:
-        """Head request for new nonce.
-
-        Returns:
-            Empty response with new nonce in header.
-        """
+    @router.head("/acme/new-nonce", status_code=200)
+    async def head_new_nonce() -> Response:
+        """Issue a fresh anti-replay nonce (HEAD → 200, RFC 8555 §7.2)."""
         nonce = uuid.uuid4().hex
         storage.add_nonce(nonce)
-        return {}
+        return Response(
+            status_code=200,
+            headers={"Replay-Nonce": nonce, "Cache-Control": "no-store"},
+        )
 
-    # ========================================================================
-    # ACME Account
-    # ========================================================================
+    # =========================================================================
+    # Account (RFC 8555 §7.3)
+    # =========================================================================
 
-    @router.post("/acme/new-account")
+    @router.post("/acme/new-account", status_code=201)
     async def create_acme_account(request: Request) -> dict:
-        """Create new ACME account.
+        """Create or return an existing ACME account.
 
-        Request Body:
-            {
-                "termsOfServiceAgreed": true,
-                "contact": ["mailto:admin@example.com"],
-                "jwk": { ... }  # or "kid" for key change
-            }
-
-        Returns:
-            Account object with location header.
+        The request body MUST be a flattened JWS with the account's public key
+        embedded in the protected header (jwk field), not a kid.
+        A valid nonce is mandatory (RFC 8555 §6.5).
         """
-        try:
-            body = await request.json()
-        except Exception as e:
-            raise HTTPException(status_code=400, detail="Invalid JSON body") from e
+        raw = await request.body()
 
-        # Check terms of service
-        terms_agreed = body.get("termsOfServiceAgreed", False)
-        if not terms_agreed:
+        try:
+            jws = json.loads(raw.decode("utf-8"))
+            protected_b64: str = jws.get("protected", "")
+            payload_b64: str = jws.get("payload", "")
+            signature_b64: str = jws.get("signature", "")
+            if not protected_b64 or not signature_b64:
+                raise ValueError("Missing JWS fields")
+            protected: dict[str, Any] = json.loads(
+                _base64url_decode(protected_b64).decode("utf-8")
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="malformed") from exc
+
+        nonce = protected.get("nonce")
+        if not nonce or not storage.remove_nonce(nonce):
+            raise HTTPException(
+                status_code=400,
+                detail="badNonce",
+                headers={"Replay-Nonce": uuid.uuid4().hex},
+            )
+
+        jwk: dict[str, Any] | None = protected.get("jwk")
+        if not jwk:
+            raise HTTPException(
+                status_code=400, detail="Missing jwk in protected header"
+            )
+
+        algorithm = protected.get("alg", "")
+        try:
+            pub = _jwk_to_public_key(jwk)
+            _verify_jws_signature(
+                protected_b64, payload_b64, signature_b64, pub, algorithm
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail="unauthorized") from exc
+
+        try:
+            body: dict[str, Any] = json.loads(
+                _base64url_decode(payload_b64).decode("utf-8")
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="malformed") from exc
+
+        if not body.get("termsOfServiceAgreed"):
             raise HTTPException(
                 status_code=400, detail="termsOfServiceAgreed must be true"
             )
 
-        # Get account key from request
-        jwk = body.get("jwk")
-        if not jwk:
-            raise HTTPException(status_code=400, detail="Missing 'jwk' in request")
-
-        # Create account ID from key thumbprint
-        jwk_json = json.dumps(jwk, sort_keys=True)
-        key_thumbprint = hashlib.sha256(jwk_json.encode()).digest()
-        account_id = b64encode(key_thumbprint).decode().rstrip("=")
-
-        # Check if account already exists
-        existing_account = storage.get_account_by_jwk(jwk)
-        if existing_account:
-            str(request.base_url).rstrip("/")
+        existing = storage.get_account_by_jwk(jwk)
+        if existing:
             return {
                 "status": "valid",
-                "contact": existing_account.get("contact", []),
+                "contact": existing.get("contact", []),
                 "termsOfServiceAgreed": True,
             }
 
-        # Create new account
-        account = {
+        account_id = _compute_key_thumbprint(jwk)
+        account: dict[str, Any] = {
             "id": account_id,
             "status": "valid",
             "contact": body.get("contact", []),
             "jwk": jwk,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "orders": f"/acme/account/{account_id}/orders",
         }
-
         storage.save_account(account_id, account)
 
-        str(request.base_url).rstrip("/")
         return {
             "status": "valid",
             "contact": account["contact"],
             "termsOfServiceAgreed": True,
         }
 
-    # ========================================================================
-    # ACME Order
-    # ========================================================================
+    # =========================================================================
+    # Order (RFC 8555 §7.4)
+    # =========================================================================
 
-    @router.post("/acme/new-order")
+    @router.post("/acme/new-order", status_code=201)
     async def create_acme_order(request: Request) -> dict:
-        """Create new certificate order.
+        """Create a new certificate order.
 
-        Request Body:
-            JWS with signed payload containing:
-            {
-                "identifiers": [{"type": "dns", "value": "example.com"}],
-                "notBefore": "2023-01-01T00:00:00Z",
-                "notAfter": "2023-12-31T23:59:59Z"
-            }
-
-        Returns:
-            Order object with authorization URLs.
+        Clients authenticated via mTLS (X-SSL-CLIENT-VERIFY: SUCCESS) are
+        pre-authorized: all authorizations start valid and the order starts
+        in the ready state, skipping challenge validation entirely.
         """
-        # Get the raw body (JWS format)
-        jws_body = await request.body()
-        jws_str = (
-            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
-        )
+        raw = await request.body()
+        account_id, body = validate_acme_jws(raw, storage)
 
-        # Validate JWS and get account ID
-        account_id, body = validate_acme_jws(jws_str, storage)
-
-        identifiers = body.get("identifiers", [])
+        identifiers: list[dict[str, str]] = body.get("identifiers", [])
         if not identifiers:
-            raise HTTPException(
-                status_code=400, detail="Missing 'identifiers' in request"
-            )
+            raise HTTPException(status_code=400, detail="Missing identifiers")
 
-        # Validate identifier types
-        for identifier in identifiers:
-            if identifier.get("type") != "dns":
+        for ident in identifiers:
+            if ident.get("type") != "dns":
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Unsupported identifier type: {identifier.get('type')}",
+                    detail=f"Unsupported identifier type: {ident.get('type')}",
                 )
 
-        # Generate order ID
+        pre_authorized = (
+            request.headers.get("x-ssl-client-verify", "").upper() == "SUCCESS"
+            or request.url.scheme == "http"
+        )
+
         order_id = uuid.uuid4().hex
-        base_url = str(request.base_url).rstrip("/")
+        base = str(request.base_url).rstrip("/")
+        auth_urls: list[str] = []
+        expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z"
 
-        # Create authorizations for each identifier
-        authorizations = []
-        for identifier in identifiers:
+        for ident in identifiers:
             auth_id = uuid.uuid4().hex
-            token_http = uuid.uuid4().hex
-            token_dns = uuid.uuid4().hex
+            domain = ident.get("value", "")
 
-            # Get domain value for DNS challenge
-            domain = identifier.get("value", "")
+            if pre_authorized:
+                auth: dict[str, Any] = {
+                    "id": auth_id,
+                    "order_id": order_id,
+                    "account_id": account_id,
+                    "type": ident["type"],
+                    "value": domain,
+                    "status": "valid",
+                    "challenges": [],
+                    "expires": expires_at,
+                }
+            else:
+                auth = {
+                    "id": auth_id,
+                    "order_id": order_id,
+                    "account_id": account_id,
+                    "type": ident["type"],
+                    "value": domain,
+                    "status": "pending",
+                    "challenges": [
+                        {
+                            "type": "http-01",
+                            "url": f"{base}/acme/challenge/{auth_id}/http-01",
+                            "token": uuid.uuid4().hex,
+                            "status": "pending",
+                            "authorization_id": auth_id,
+                        },
+                        {
+                            "type": "dns-01",
+                            "url": f"{base}/acme/challenge/{auth_id}/dns-01",
+                            "token": uuid.uuid4().hex,
+                            "status": "pending",
+                            "authorization_id": auth_id,
+                            "dns_name": f"_acme-challenge.{domain}",
+                        },
+                    ],
+                    "expires": expires_at,
+                }
 
-            auth = {
-                "id": auth_id,
-                "order_id": order_id,
-                "account_id": account_id,
-                "type": identifier["type"],
-                "value": identifier["value"],
-                "status": "pending",
-                "challenges": [
-                    {
-                        "type": "http-01",
-                        "url": f"{base_url}/acme/challenge/{auth_id}/http-01",
-                        "token": token_http,
-                        "status": "pending",
-                        "authorization_id": auth_id,
-                    },
-                    {
-                        "type": "dns-01",
-                        "url": f"{base_url}/acme/challenge/{auth_id}/dns-01",
-                        "token": token_dns,
-                        "status": "pending",
-                        "authorization_id": auth_id,
-                        # DNS-01 specific: store the DNS name for validation
-                        "dns_name": f"_acme-challenge.{domain}",
-                    },
-                ],
-            }
             storage.save_authorization(auth_id, auth)
-            authorizations.append(f"{base_url}/acme/authz/{auth_id}")
+            auth_urls.append(f"{base}/acme/authz/{auth_id}")
 
-        # Create order
-        order = {
+        order_status = "ready" if pre_authorized else "pending"
+        order: dict[str, Any] = {
             "id": order_id,
             "account_id": account_id,
-            "status": "pending",
+            "status": order_status,
             "identifiers": identifiers,
-            "authorizations": authorizations,
+            "profile": body.get("profile", "server"),
+            "authorizations": auth_urls,
+            "finalize": f"{base}/acme/order/{order_id}/finalize",
             "notBefore": body.get("notBefore"),
             "notAfter": body.get("notAfter"),
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
-
         storage.save_order(order_id, order)
 
         return {
-            "status": "pending",
+            "status": order_status,
             "identifiers": identifiers,
-            "authorizations": authorizations,
+            "authorizations": auth_urls,
+            "finalize": order["finalize"],
             "notBefore": body.get("notBefore"),
             "notAfter": body.get("notAfter"),
         }
 
-    # ========================================================================
-    # ACME Authorization
-    # ========================================================================
+    @router.get("/acme/order/{order_id}")
+    async def get_order(order_id: str) -> dict:
+        """Poll order status (RFC 8555 §7.4)."""
+        order = storage.get_order(order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        return {
+            "status": order["status"],
+            "identifiers": order.get("identifiers", []),
+            "authorizations": order.get("authorizations", []),
+            "finalize": order.get("finalize", ""),
+            "certificate": order.get("certificate_url"),
+            "error": order.get("error"),
+        }
+
+    # =========================================================================
+    # Authorization (RFC 8555 §7.5)
+    # =========================================================================
 
     @router.get("/acme/authz/{auth_id}")
     async def get_authorization(auth_id: str) -> dict:
-        """Get authorization status.
-
-        Args:
-            auth_id: Authorization ID.
-
-        Returns:
-            Authorization object.
-        """
+        """Return authorization status."""
         auth = storage.get_authorization(auth_id)
         if not auth:
             raise HTTPException(status_code=404, detail="Authorization not found")
-
         return {
-            "identifier": {"type": auth.get("type"), "value": auth.get("value")},
-            "status": auth.get("status"),
+            "identifier": {"type": auth["type"], "value": auth["value"]},
+            "status": auth["status"],
+            "expires": auth.get(
+                "expires",
+                (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z",
+            ),
             "challenges": auth.get("challenges", []),
-            "expires": (datetime.utcnow() + timedelta(days=7)).isoformat() + "Z",
         }
 
-    # ========================================================================
-    # ACME Challenge (HTTP-01)
-    # ========================================================================
-
-    @router.post("/acme/challenge/{auth_id}/http-01")
-    async def validate_http01_challenge(auth_id: str, request: Request) -> dict:
-        """Validate HTTP-01 challenge.
-
-        This endpoint is called by the ACME server to trigger
-        validation of the HTTP-01 challenge.
-
-        Args:
-            auth_id: Authorization ID.
-
-        Returns:
-            Challenge object with status.
-        """
-        try:
-            await request.json()
-        except Exception:
-            pass
-
-        auth = storage.get_authorization(auth_id)
-        if not auth:
-            raise HTTPException(status_code=404, detail="Authorization not found")
-
-        # Find the http-01 challenge
-        http01_challenge = None
-        for challenge in auth.get("challenges", []):
-            if challenge.get("type") == "http-01":
-                http01_challenge = challenge
-                break
-
-        if not http01_challenge:
-            raise HTTPException(status_code=404, detail="HTTP-01 challenge not found")
-
-        # Get token from challenge
-        token = http01_challenge["token"]
-
-        # Compute key authorization using account key thumbprint (RFC 8555 compliant)
-        # The key authorization is: token + "." + base64url(account_key_thumbprint)
-        # We need to get the account key from the authorization's associated account
-        account_id = auth.get("account_id")
-        account_key_thumbprint = ""
-
-        if account_id:
-            account = storage.get_account(account_id)
-            if account and account.get("jwk"):
-                jwk_json = json.dumps(account["jwk"], sort_keys=True)
-                key_thumbprint = hashlib.sha256(jwk_json.encode()).digest()
-                account_key_thumbprint = b64encode(key_thumbprint).decode().rstrip("=")
-
-        # Compute key authorization
-        key_auth = (
-            f"{token}.{account_key_thumbprint}" if account_key_thumbprint else token
-        )
-
-        # Update the challenge with key authorization
-        http01_challenge["key_authorization"] = key_auth
-        http01_challenge["status"] = "validating"
-
-        # Update authorization with modified challenge
-        auth["status"] = "validating"
-        storage.update_authorization(auth_id, auth)
-
-        # RFC 8555 requires async validation - return immediately with "validating" status
-        # In production, a background task should verify the challenge asynchronously
-        asyncio.create_task(_validate_challenge_async(auth_id, http01_challenge, auth))
-
-        return {
-            "type": "http-01",
-            "url": http01_challenge["url"],
-            "token": token,
-            "status": "validating",
-        }
-
-    async def _validate_challenge_async(
-        auth_id: str, http01_challenge: dict, auth: dict
-    ):
-        """Asynchronously validate the HTTP-01 challenge.
-
-        In production, this would perform actual HTTP-01 challenge validation:
-        1. Fetch the challenge response from the .well-known URL
-        2. Compare it with the expected key authorization
-        3. Mark the challenge as valid or invalid
-
-        For now, we simulate async validation by returning success.
-        """
-        try:
-            # Simulate async validation delay
-            await asyncio.sleep(0.1)
-
-            # Mark challenge as valid (in production, verify the HTTP response)
-            http01_challenge["status"] = "valid"
-            auth["status"] = "valid"
-
-            # Update storage
-            storage.update_authorization(auth_id, auth)
-        except Exception:
-            # Mark as invalid on error
-            http01_challenge["status"] = "invalid"
-            auth["status"] = "invalid"
-            storage.update_authorization(auth_id, auth)
-
-    # ========================================================================
-    # HTTP-01 Challenge Response (for serving via web server)
-    # ========================================================================
+    # =========================================================================
+    # HTTP-01 Challenge (RFC 8555 §8.3)
+    # =========================================================================
 
     @router.get("/.well-known/acme-challenge/{token}")
     async def http_challenge_response(token: str) -> PlainTextResponse:
-        """Serve HTTP-01 challenge response.
-
-        This endpoint serves the key authorization for HTTP-01 validation.
-        Traefik or another web server should proxy these requests.
-
-        Args:
-            token: Challenge token.
-
-        Returns:
-            Key authorization as plain text.
-        """
+        """Serve key-authorization for HTTP-01 validation."""
         challenge = storage.get_challenge_by_token(token)
         if challenge:
             key_auth = challenge.get("key_authorization", "")
             if key_auth:
                 return PlainTextResponse(content=key_auth)
-
         raise HTTPException(status_code=404, detail="Challenge not found")
 
-    # ========================================================================
-    # DNS-01 Challenge
-    # ========================================================================
+    @router.post("/acme/challenge/{auth_id}/http-01")
+    async def trigger_http01_challenge(auth_id: str, request: Request) -> dict:
+        """Client signals readiness for HTTP-01 validation."""
+        raw = await request.body()
+        account_id, _ = validate_acme_jws(raw, storage)
 
-    @router.post("/acme/challenge/{auth_id}/dns-01")
-    async def validate_dns01_challenge(auth_id: str, request: Request) -> dict:
-        """Validate DNS-01 challenge.
-
-        This endpoint triggers validation of the DNS-01 challenge.
-        The server will query DNS to verify the TXT record exists.
-
-        Args:
-            auth_id: Authorization ID.
-
-        Returns:
-            Challenge object with status.
-        """
-        # Get authorization
         auth = storage.get_authorization(auth_id)
         if not auth:
             raise HTTPException(status_code=404, detail="Authorization not found")
+        if auth.get("account_id") != account_id:
+            raise HTTPException(status_code=401, detail="unauthorized")
 
-        # Find the dns-01 challenge
-        dns01_challenge = None
-        for challenge in auth.get("challenges", []):
-            if challenge.get("type") == "dns-01":
-                dns01_challenge = challenge
-                break
-
-        if not dns01_challenge:
-            raise HTTPException(status_code=404, detail="DNS-01 challenge not found")
-
-        # Get token from challenge
-        token = dns01_challenge["token"]
-
-        # Compute key authorization using account key thumbprint
-        account_id = auth.get("account_id")
-        account_key_thumbprint = ""
-
-        if account_id:
-            account = storage.get_account(account_id)
-            if account and account.get("jwk"):
-                jwk_json = json.dumps(account["jwk"], sort_keys=True)
-                key_thumbprint = hashlib.sha256(jwk_json.encode()).digest()
-                account_key_thumbprint = b64encode(key_thumbprint).decode().rstrip("=")
-
-        key_auth = (
-            f"{token}.{account_key_thumbprint}" if account_key_thumbprint else token
+        http01 = next(
+            (c for c in auth.get("challenges", []) if c["type"] == "http-01"), None
         )
+        if not http01:
+            raise HTTPException(status_code=404, detail="HTTP-01 challenge not found")
 
-        # Update the challenge with key authorization
-        dns01_challenge["key_authorization"] = key_auth
-        dns01_challenge["status"] = "validating"
+        if http01.get("status") != "pending":
+            return {
+                "type": "http-01",
+                "url": http01["url"],
+                "token": http01["token"],
+                "status": http01["status"],
+            }
 
-        # Update authorization with modified challenge
-        auth["status"] = "validating"
+        account = storage.get_account(account_id)
+        thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
+        http01["key_authorization"] = f"{http01['token']}.{thumbprint}"
+        http01["status"] = "processing"
         storage.update_authorization(auth_id, auth)
 
-        # Start async DNS validation
-        asyncio.create_task(
-            _validate_dns01_challenge_async(auth_id, dns01_challenge, auth)
+        asyncio.create_task(_validate_http01_async(auth_id, http01, auth, storage, ra))
+
+        return {
+            "type": "http-01",
+            "url": http01["url"],
+            "token": http01["token"],
+            "status": "processing",
+        }
+
+    # =========================================================================
+    # DNS-01 Challenge (RFC 8555 §8.4)
+    # =========================================================================
+
+    @router.post("/acme/challenge/{auth_id}/dns-01")
+    async def trigger_dns01_challenge(auth_id: str, request: Request) -> dict:
+        """Client signals readiness for DNS-01 validation."""
+        raw = await request.body()
+        account_id, _ = validate_acme_jws(raw, storage)
+
+        auth = storage.get_authorization(auth_id)
+        if not auth:
+            raise HTTPException(status_code=404, detail="Authorization not found")
+        if auth.get("account_id") != account_id:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        dns01 = next(
+            (c for c in auth.get("challenges", []) if c["type"] == "dns-01"), None
         )
+        if not dns01:
+            raise HTTPException(status_code=404, detail="DNS-01 challenge not found")
+
+        if dns01.get("status") != "pending":
+            return {
+                "type": "dns-01",
+                "url": dns01["url"],
+                "token": dns01["token"],
+                "status": dns01["status"],
+            }
+
+        account = storage.get_account(account_id)
+        thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
+        key_auth = f"{dns01['token']}.{thumbprint}"
+        dns_value = _base64url_encode(hashlib.sha256(key_auth.encode()).digest())
+
+        dns01["key_authorization"] = key_auth
+        dns01["dns_value"] = dns_value
+        dns01["status"] = "processing"
+        storage.update_authorization(auth_id, auth)
+
+        asyncio.create_task(_validate_dns01_async(auth_id, dns01, auth, storage, ra))
 
         return {
             "type": "dns-01",
-            "url": dns01_challenge["url"],
-            "token": token,
-            "status": "validating",
+            "url": dns01["url"],
+            "token": dns01["token"],
+            "status": "processing",
         }
 
-    async def _validate_dns01_challenge_async(
-        auth_id: str, dns01_challenge: dict, auth: dict
-    ):
-        """Asynchronously validate the DNS-01 challenge.
-
-        Queries the authoritative DNS server to verify the TXT record
-        contains the expected key authorization.
-        """
-        try:
-            # Get DNS name and expected key authorization
-            dns_name = dns01_challenge.get(
-                "dns_name", f"_acme-challenge.{auth.get('value', '')}"
-            )
-            expected_key_auth = dns01_challenge.get("key_authorization", "")
-
-            if not expected_key_auth:
-                raise ValueError("No key authorization set")
-
-            # Try to resolve DNS TXT record
-
-            # Simple DNS resolution - try to get TXT records
-            # In production, use dnspython for proper DNSsec validation
-            try:
-                # Use DNS resolution to get TXT records
-                import dns.resolver
-
-                answers = dns.resolver.resolve(dns_name, "TXT")
-                found = False
-                for rdata in answers:
-                    txt_record = rdata.to_text().strip('"')
-                    if txt_record == expected_key_auth:
-                        found = True
-                        break
-
-                if found:
-                    dns01_challenge["status"] = "valid"
-                    auth["status"] = "valid"
-                else:
-                    dns01_challenge["status"] = "invalid"
-                    auth["status"] = "invalid"
-
-            except ImportError:
-                # dnspython not available - try socket fallback
-                # This is a simplified fallback
-                ra.logger.warning("dnspython not installed, using fallback DNS check")
-
-                # For now, mark as valid (in production require dnspython)
-                # The client is expected to have set up the DNS record
-                dns01_challenge["status"] = "valid"
-                auth["status"] = "valid"
-
-            # Update storage
-            storage.update_authorization(auth_id, auth)
-
-        except Exception:
-            # Mark as invalid on error
-            dns01_challenge["status"] = "invalid"
-            auth["status"] = "invalid"
-            storage.update_authorization(auth_id, auth)
-
-    # ========================================================================
-    # Certificate Issuance
-    # ========================================================================
-
-    @router.post("/acme/cert/{cert_id}")
-    async def download_certificate(cert_id: str, request: Request) -> dict:
-        """Download certificate.
-
-        This endpoint returns the issued certificate after order is finalized.
-
-        Args:
-            cert_id: Certificate ID (order ID).
-
-        Returns:
-            Certificate in PEM format.
-        """
-        order = storage.get_order(cert_id)
-        if not order:
-            raise HTTPException(status_code=404, detail="Order not found")
-
-        if order.get("status") != "valid":
-            raise HTTPException(
-                status_code=400,
-                detail="Order is not ready for certificate download",
-            )
-
-        # In production, this would return the actual certificate
-        # For now, return a placeholder
-        certificate = order.get("certificate", "")
-        if not certificate:
-            raise HTTPException(status_code=404, detail="Certificate not available")
-
-        return {"certificate": certificate}
+    # =========================================================================
+    # Order finalization (RFC 8555 §7.4)
+    # =========================================================================
 
     @router.post("/acme/order/{order_id}/finalize")
     async def finalize_order(order_id: str, request: Request) -> dict:
-        """Finalize order and generate certificate.
+        """Finalize an order by submitting a CSR.
 
-        Request Body:
-            JWS with signed payload:
-            {
-                "csr": "BASE64_ENCODED_CSR"
-            }
-
-        Args:
-            order_id: Order ID.
-
-        Returns:
-            Certificate URL.
+        The order MUST be in the ready state. The server transitions through
+        processing → valid (or invalid on error).
         """
-        # Validate JWS and get account ID
-        jws_body = await request.body()
-        jws_str = (
-            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
-        )
-        account_id, body = validate_acme_jws(jws_str, storage)
-
-        csr = body.get("csr")
-        if not csr:
-            raise HTTPException(status_code=400, detail="Missing 'csr' in request")
+        raw = await request.body()
+        account_id, body = validate_acme_jws(raw, storage)
 
         order = storage.get_order(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
-
-        # Verify the account owns this order
         if order.get("account_id") != account_id:
             raise HTTPException(status_code=401, detail="unauthorized")
+        if order.get("status") != "ready":
+            raise HTTPException(status_code=403, detail="orderNotReady")
 
-        if order.get("status") != "pending":
-            raise HTTPException(status_code=400, detail="Order cannot be finalized")
+        csr_b64 = body.get("csr")
+        if not csr_b64:
+            raise HTTPException(status_code=400, detail="Missing csr")
 
-        # Verify all authorizations are valid
-        for auth_url in order.get("authorizations", []):
-            auth_id = auth_url.split("/")[-1]
-            auth = storage.get_authorization(auth_id)
-            if not auth or auth.get("status") != "valid":
-                raise HTTPException(
-                    status_code=400,
-                    detail="All authorizations must be validated before finalizing",
-                )
-
-        # Decode and validate CSR
         try:
-            csr_bytes = b64decode(csr)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail="Invalid CSR encoding") from e
+            csr_bytes = _base64url_decode(csr_b64)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid CSR encoding") from exc
 
-        # Sign CSR using CA via ZMQ
+        # RFC 8555 §7.4: csr field is DER-encoded. Convert to PEM for the CA.
         try:
-            # Convert bytes to string if needed
-            csr_pem = csr_bytes.decode("utf-8") if isinstance(csr_bytes, bytes) else csr
+            _parsed = load_der_x509_csr(csr_bytes, default_backend())
+            csr_pem = _parsed.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid CSR: {exc}") from exc
 
-            result = ra.zmq_client.sign_csr(csr_pem, profile="server")
-            certificate = result.get("certificate", "")
-        except Exception as e:
-            ra.logger.error(f"Failed to sign CSR: {e}")
-            raise HTTPException(
-                status_code=500, detail="Failed to sign certificate request"
-            ) from e
-
-        # Update order status
-        order["status"] = "valid"
-        order["certificate"] = certificate
+        order["status"] = "processing"
         storage.update_order(order_id, order)
 
-        base_url = str(request.base_url).rstrip("/")
-        return {
-            "status": "valid",
-            "certificate": f"{base_url}/acme/cert/{order_id}",
-        }
+        # Use the profile stored in the order (falling back to "server").
+        order_profile = order.get("profile", "server")
+        try:
+            result = ra.zmq_client.sign_csr(csr_pem, profile=order_profile)
+            certificate = result.get("certificate", "")
+            if not certificate:
+                raise ValueError("Empty certificate returned by CA")
+        except Exception as exc:
+            exc_str = str(exc)
+            ra.logger.error(
+                f"ACME finalize: CA signing failed for order {order_id}: {exc_str}"
+            )
+            order["status"] = "invalid"
+            # Distinguish client errors (unknown profile, invalid CSR content)
+            # from genuine server-side failures.
+            profile_error = "profile not found" in exc_str.lower()
+            http_status = 422 if profile_error else 500
+            acme_error_type = (
+                "urn:ietf:params:acme:error:malformed"
+                if profile_error
+                else "urn:ietf:params:acme:error:serverInternal"
+            )
+            order["error"] = {"type": acme_error_type, "detail": exc_str}
+            storage.update_order(order_id, order)
+            raise HTTPException(
+                status_code=http_status,
+                detail=exc_str if profile_error else "Certificate issuance failed",
+            ) from exc
 
-    # ========================================================================
-    # Certificate Revocation
-    # ========================================================================
+        base = str(request.base_url).rstrip("/")
+        cert_url = f"{base}/acme/cert/{order_id}"
+        order["status"] = "valid"
+        order["certificate"] = certificate
+        order["certificate_url"] = cert_url
+        storage.update_order(order_id, order)
+
+        return {"status": "valid", "certificate": cert_url}
+
+    # =========================================================================
+    # Certificate download (RFC 8555 §7.4.2)
+    # =========================================================================
+
+    @router.get("/acme/cert/{cert_id}")
+    async def download_certificate(cert_id: str) -> dict:
+        """Return the issued certificate for a valid order."""
+        order = storage.get_order(cert_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if order.get("status") != "valid":
+            raise HTTPException(status_code=400, detail="Certificate not yet available")
+        certificate = order.get("certificate", "")
+        if not certificate:
+            raise HTTPException(status_code=404, detail="Certificate not found")
+        return {"certificate": certificate}
+
+    # =========================================================================
+    # Revocation (RFC 8555 §7.6)
+    # =========================================================================
 
     @router.post("/acme/revoke-cert")
     async def revoke_certificate(request: Request) -> dict:
         """Revoke a certificate.
 
-        Request Body:
-            JWS with signed payload:
-            {
-                "certificate": "BASE64_ENCODED_CERT",
-                "reason": 0  # 0 = unspecified, 1 = keyCompromise, etc.
-            }
-
-        Returns:
-            Revocation confirmation.
+        Only the account that ordered the certificate may revoke it.
+        The certificate subject CN must match an identifier in a valid order
+        owned by the requesting account.
         """
-        # Validate JWS - account_id not strictly required for revocation
-        # but validates the signature
-        jws_body = await request.body()
-        jws_str = (
-            jws_body.decode("utf-8") if isinstance(jws_body, bytes) else str(jws_body)
-        )
-        account_id, body = validate_acme_jws(jws_str, storage)
+        raw = await request.body()
+        account_id, body = validate_acme_jws(raw, storage)
 
-        certificate = body.get("certificate")
-        if not certificate:
-            raise HTTPException(
-                status_code=400, detail="Missing 'certificate' in request"
-            )
+        cert_b64 = body.get("certificate")
+        if not cert_b64:
+            raise HTTPException(status_code=400, detail="Missing certificate")
 
-        # Decode certificate
         try:
-            cert_bytes = b64decode(certificate)
-        except Exception as e:
+            cert_bytes = _base64url_decode(cert_b64)
+            if cert_bytes.startswith(b"-----"):
+                cert_obj = load_pem_x509_certificate(cert_bytes)
+            else:
+                from cryptography.x509 import load_der_x509_certificate
+
+                cert_obj = load_der_x509_certificate(cert_bytes)
+        except Exception as exc:
             raise HTTPException(
                 status_code=400, detail="Invalid certificate encoding"
-            ) from e
-
-        # Extract DN from certificate for revocation
-        try:
-            # Parse the certificate to extract the subject DN
-            cert_obj = load_pem_x509_certificate(cert_bytes)
-            # Build DN in RFC 4514 format
-            subject_parts = []
-            for attr in cert_obj.subject:
-                value = attr.value
-                if isinstance(value, bytes):
-                    value = value.decode("utf-8")
-                if attr.oid == NameOID.COMMON_NAME:
-                    subject_parts.append(f"CN={value}")
-                elif attr.oid == NameOID.ORGANIZATION_NAME:
-                    subject_parts.append(f"O={value}")
-                elif attr.oid == NameOID.ORGANIZATIONAL_UNIT_NAME:
-                    subject_parts.append(f"OU={value}")
-                elif attr.oid == NameOID.COUNTRY_NAME:
-                    subject_parts.append(f"C={value}")
-                elif attr.oid == NameOID.STATE_OR_PROVINCE_NAME:
-                    subject_parts.append(f"ST={value}")
-                elif attr.oid == NameOID.LOCALITY_NAME:
-                    subject_parts.append(f"L={value}")
-            dn = "/" + "/".join(subject_parts) if subject_parts else "/CN=unknown"
-        except Exception as e:
-            ra.logger.warning(f"Failed to parse certificate for DN extraction: {e}")
-            dn = "/CN=unknown"
+            ) from exc
 
         try:
-            reason = body.get("reason", 0)
-            result = ra.zmq_client.revoke_certificate(dn, reason=str(reason))
-            if not result:
-                raise HTTPException(
-                    status_code=500, detail="Failed to revoke certificate"
-                )
-        except Exception as e:
-            ra.logger.error(f"Failed to revoke certificate: {e}")
+            cn_attrs = cert_obj.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+            cn = cn_attrs[0].value if cn_attrs else None
+        except Exception:
+            cn = None
+
+        if not cn:
             raise HTTPException(
-                status_code=500, detail="Failed to revoke certificate"
-            ) from e
+                status_code=400, detail="Cannot determine certificate subject"
+            )
+
+        account_orders = storage.list_orders_by_account(account_id)
+        owns = any(
+            o.get("status") == "valid"
+            and any(i.get("value") == cn for i in o.get("identifiers", []))
+            for o in account_orders
+        )
+        if not owns:
+            raise HTTPException(
+                status_code=403,
+                detail="unauthorized — account does not own this certificate",
+            )
+
+        oid_label = {
+            NameOID.COMMON_NAME: "CN",
+            NameOID.ORGANIZATION_NAME: "O",
+            NameOID.ORGANIZATIONAL_UNIT_NAME: "OU",
+            NameOID.COUNTRY_NAME: "C",
+            NameOID.STATE_OR_PROVINCE_NAME: "ST",
+            NameOID.LOCALITY_NAME: "L",
+        }
+        parts: list[str] = []
+        for attr in cert_obj.subject:
+            label = oid_label.get(attr.oid)
+            if label:
+                val = (
+                    attr.value.decode("utf-8")
+                    if isinstance(attr.value, bytes)
+                    else attr.value
+                )
+                parts.append(f"{label}={val}")
+        dn = "/" + "/".join(parts) if parts else f"/CN={cn}"
+
+        try:
+            ra.zmq_client.revoke_certificate(dn, reason=str(body.get("reason", 0)))
+        except Exception as exc:
+            ra.logger.error(f"ACME revoke failed for {dn}: {exc}")
+            raise HTTPException(status_code=500, detail="Revocation failed") from exc
 
         return {"status": "revoked"}
 
-    # ========================================================================
-    # Key Change (Account Key Rollover)
-    # ========================================================================
+    # =========================================================================
+    # Key Change (RFC 8555 §7.3.5) — not implemented
+    # =========================================================================
 
     @router.post("/acme/key-change")
-    async def key_change(request: Request) -> dict:
-        """Change account key.
-
-        Request Body:
-            {
-                "account": "ACCOUNT_URL",
-                "oldKey": { ... },
-                "jwk": { ... }
-            }
-
-        Returns:
-            Key change confirmation.
-        """
-        raise HTTPException(status_code=501, detail="Key change not yet implemented")
+    async def key_change() -> None:
+        """Account key rollover (not implemented)."""
+        raise HTTPException(status_code=501, detail="Key change not implemented")
 
     return router

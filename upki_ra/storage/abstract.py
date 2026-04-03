@@ -174,6 +174,17 @@ class AbstractStorage(ABC):
             A list of all order data.
         """
 
+    @abstractmethod
+    def list_orders_by_account(self, account_id: str) -> list[dict[str, Any]]:
+        """List all ACME orders for a specific account.
+
+        Args:
+            account_id: The account identifier.
+
+        Returns:
+            A list of order data for the given account.
+        """
+
     # ========================================================================
     # Authorization Management
     # ========================================================================

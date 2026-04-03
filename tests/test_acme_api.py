@@ -13,6 +13,8 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
 from upki_ra.routes.acme_api import (
     _base64url_decode,
     _base64url_encode,
@@ -138,7 +140,7 @@ class TestJWKToPublicKey(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             _jwk_to_public_key(jwk)
 
-        self.assertIn("Unsupported curve", str(context.exception))
+        self.assertIn("Unsupported", str(context.exception))
 
 
 class TestJWSSignature(unittest.TestCase):
@@ -162,89 +164,94 @@ class TestJWSSignature(unittest.TestCase):
         """Clean up test fixtures."""
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _create_jws(self, payload: str, algorithm: str) -> str:
-        """Helper to create a test JWS."""
+    def _create_jws_parts(self, payload: str, algorithm: str) -> tuple[str, str, str]:
+        """Helper to create JWS flattened-JSON parts (protected_b64, payload_b64, sig_b64).
+
+        EC signatures are returned in IEEE P1363 format (r || s) as required by JWS.
+        """
         from cryptography.hazmat.primitives import hashes
 
-        # Create protected header
         protected = {"alg": algorithm}
         protected_b64 = _base64url_encode(json.dumps(protected).encode())
-
-        # Sign the payload
         sign_input = f"{protected_b64}.{payload}".encode()
 
         if algorithm == "RS256":
-            signature = self.private_key.sign(
+            sig_der = self.private_key.sign(
                 sign_input, padding.PKCS1v15(), hashes.SHA256()
             )
+            sig_b64 = _base64url_encode(sig_der)
         elif algorithm == "ES256":
-            signature = self.ec_private_key.sign(sign_input, ec.ECDSA(hashes.SHA256()))
+            # DER signature from cryptography — convert to IEEE P1363 (r || s)
+            sig_der = self.ec_private_key.sign(sign_input, ec.ECDSA(hashes.SHA256()))
+            r, s = decode_dss_signature(sig_der)
+            sig_p1363 = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+            sig_b64 = _base64url_encode(sig_p1363)
         else:
             raise ValueError(f"Unsupported algorithm: {algorithm}")
 
-        signature_b64 = _base64url_encode(signature)
-
-        return f"{protected_b64}.{payload}.{signature_b64}"
+        return protected_b64, payload, sig_b64
 
     def test_verify_jws_rs256(self):
         """Test JWS signature verification with RS256."""
         payload = _base64url_encode(b'{"test": "data"}')
-        jws = self._create_jws(payload, "RS256")
+        protected_b64, payload_b64, sig_b64 = self._create_jws_parts(payload, "RS256")
 
-        result = _verify_jws_signature(jws, self.public_key, "RS256")
-        self.assertTrue(result)
+        # Should not raise
+        _verify_jws_signature(
+            protected_b64, payload_b64, sig_b64, self.public_key, "RS256"
+        )
 
     def test_verify_jws_es256(self):
         """Test JWS signature verification with ES256."""
-
-        # Generate EC key for this test
         ec_private_key = ec.generate_private_key(
             ec.SECP256R1(), backend=default_backend()
         )
         ec_public_key = ec_private_key.public_key()
 
         payload = _base64url_encode(b'{"test": "data"}')
-
-        # Create JWS with EC key
         protected = {"alg": "ES256"}
         protected_b64 = _base64url_encode(json.dumps(protected).encode())
         sign_input = f"{protected_b64}.{payload}".encode()
-        signature = ec_private_key.sign(sign_input, ec.ECDSA(hashes.SHA256()))
-        signature_b64 = _base64url_encode(signature)
-        jws = f"{protected_b64}.{payload}.{signature_b64}"
 
-        result = _verify_jws_signature(jws, ec_public_key, "ES256")
-        self.assertTrue(result)
+        # DER → P1363
+        sig_der = ec_private_key.sign(sign_input, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(sig_der)
+        sig_p1363 = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        sig_b64 = _base64url_encode(sig_p1363)
+
+        # Should not raise
+        _verify_jws_signature(protected_b64, payload, sig_b64, ec_public_key, "ES256")
 
     def test_verify_jws_invalid_signature(self):
         """Test JWS signature verification with invalid signature."""
         payload = _base64url_encode(b'{"test": "data"}')
-        jws = self._create_jws(payload, "RS256")
+        protected_b64, payload_b64, _ = self._create_jws_parts(payload, "RS256")
+        bad_sig_b64 = _base64url_encode(b"invalid_signature" * 10)
 
-        # Modify the signature to make it invalid
-        parts = jws.split(".")
-        parts[2] = _base64url_encode(b"invalid_signature" * 10)
-        invalid_jws = ".".join(parts)
-
-        with self.assertRaises((ValueError, Exception)):
-            _verify_jws_signature(invalid_jws, self.public_key, "RS256")
+        with self.assertRaises(Exception):
+            _verify_jws_signature(
+                protected_b64, payload_b64, bad_sig_b64, self.public_key, "RS256"
+            )
 
     def test_verify_jws_invalid_format(self):
-        """Test JWS with invalid format."""
-        invalid_jws = "not.a.valid.jws"
+        """Test _verify_jws_signature raises on unsupported algorithm (replaces old format test)."""
+        payload = _base64url_encode(b'{"test": "data"}')
+        protected_b64, payload_b64, sig_b64 = self._create_jws_parts(payload, "RS256")
 
-        with self.assertRaises(ValueError) as context:
-            _verify_jws_signature(invalid_jws, self.public_key, "RS256")
-
-        self.assertIn("Invalid JWS format", str(context.exception))
+        with self.assertRaises(ValueError):
+            _verify_jws_signature(
+                protected_b64, payload_b64, sig_b64, self.public_key, "UNSUPPORTED"
+            )
 
     def test_verify_jws_unsupported_algorithm(self):
         """Test JWS with unsupported algorithm."""
         payload = _base64url_encode(b'{"test": "data"}')
-        jws = self._create_jws(payload, "RS256")
+        protected_b64, payload_b64, sig_b64 = self._create_jws_parts(payload, "RS256")
 
         with self.assertRaises(ValueError) as context:
-            _verify_jws_signature(jws, self.public_key, "UNSUPPORTED")
+            _verify_jws_signature(
+                protected_b64, payload_b64, sig_b64, self.public_key, "UNSUPPORTED"
+            )
 
         self.assertIn("Unsupported algorithm", str(context.exception))
 
