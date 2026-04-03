@@ -29,7 +29,7 @@ def create_client_routes(ra: RegistrationAuthority) -> APIRouter:
     Returns:
         Configured FastAPI APIRouter.
     """
-    router = APIRouter(prefix="/", tags=["client"])
+    router = APIRouter(prefix="", tags=["client"])
 
     # Pydantic models for request bodies
     class RenewRequest(BaseModel):
