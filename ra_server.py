@@ -46,7 +46,7 @@ def create_app(ra: RegistrationAuthority) -> FastAPI:
     )
 
     # Register API routers
-    app.include_router(create_acme_routes(ra), prefix="/acme")
+    app.include_router(create_acme_routes(ra), prefix="")
     app.include_router(create_public_routes(ra), prefix="/api/v1")
     app.include_router(create_private_routes(ra), prefix="/api/v1/private")
     app.include_router(create_client_routes(ra), prefix="/api/v1/client")

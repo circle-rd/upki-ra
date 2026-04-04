@@ -70,15 +70,24 @@ class SQLiteStorage(AbstractStorage):
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # Create nonces table
+        # Create nonces table (with TTL column)
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS nonces (
                 nonce TEXT PRIMARY KEY,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL DEFAULT (DATETIME('now', '+1 day'))
             )
             """
         )
+        # Migrate existing databases that lack the expires_at column
+        cursor.execute("PRAGMA table_info(nonces)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "expires_at" not in columns:
+            cursor.execute(
+                "ALTER TABLE nonces ADD COLUMN expires_at TIMESTAMP "
+                "NOT NULL DEFAULT (DATETIME('now', '+1 day'))"
+            )
 
         # Create accounts table
         cursor.execute(
@@ -148,7 +157,7 @@ class SQLiteStorage(AbstractStorage):
     # ========================================================================
 
     def add_nonce(self, nonce: str) -> bool:
-        """Add a nonce to the storage.
+        """Add a nonce to the storage and purge expired nonces.
 
         Args:
             nonce: The nonce value to store.
@@ -159,25 +168,33 @@ class SQLiteStorage(AbstractStorage):
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            cursor.execute("INSERT INTO nonces (nonce) VALUES (?)", (nonce,))
+            cursor.execute(
+                "INSERT INTO nonces (nonce, expires_at) VALUES (?, DATETIME('now', '+1 day'))",
+                (nonce,),
+            )
+            # Purge expired nonces on every insert (cheap housekeeping)
+            cursor.execute("DELETE FROM nonces WHERE expires_at < CURRENT_TIMESTAMP")
             conn.commit()
             return True
         except sqlite3.Error:
             return False
 
     def remove_nonce(self, nonce: str) -> bool:
-        """Remove and validate a nonce.
+        """Remove and validate a nonce, rejecting expired ones.
 
         Args:
             nonce: The nonce value to remove and validate.
 
         Returns:
-            True if the nonce was valid and removed, False otherwise.
+            True if the nonce was valid, present, and not expired; False otherwise.
         """
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM nonces WHERE nonce = ?", (nonce,))
+            cursor.execute(
+                "DELETE FROM nonces WHERE nonce = ? AND expires_at >= CURRENT_TIMESTAMP",
+                (nonce,),
+            )
             deleted = cursor.rowcount > 0
             conn.commit()
             return deleted
@@ -387,6 +404,26 @@ class SQLiteStorage(AbstractStorage):
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT data FROM orders")
+            rows = cursor.fetchall()
+            return [json.loads(row[0]) for row in rows]
+        except sqlite3.Error:
+            return []
+
+    def list_orders_by_account(self, account_id: str) -> list[dict[str, Any]]:
+        """List all ACME orders for a specific account.
+
+        Args:
+            account_id: The account identifier.
+
+        Returns:
+            A list of order data for the given account.
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT data FROM orders WHERE account_id = ?", (account_id,)
+            )
             rows = cursor.fetchall()
             return [json.loads(row[0]) for row in rows]
         except sqlite3.Error:

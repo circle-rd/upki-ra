@@ -4,19 +4,26 @@ uPKI RA Server - ACME API Unit Tests.
 Unit tests for ACME protocol functions (JWS, base64url, JWK handling).
 """
 
+import datetime
+import hashlib
 import json
 import shutil
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+from cryptography.x509.oid import NameOID
 
 from upki_ra.routes.acme_api import (
     _base64url_decode,
     _base64url_encode,
     _jwk_to_public_key,
+    _validate_tls_alpn01_async,
     _verify_jws_signature,
 )
 
@@ -138,7 +145,7 @@ class TestJWKToPublicKey(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             _jwk_to_public_key(jwk)
 
-        self.assertIn("Unsupported curve", str(context.exception))
+        self.assertIn("Unsupported", str(context.exception))
 
 
 class TestJWSSignature(unittest.TestCase):
@@ -162,89 +169,94 @@ class TestJWSSignature(unittest.TestCase):
         """Clean up test fixtures."""
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _create_jws(self, payload: str, algorithm: str) -> str:
-        """Helper to create a test JWS."""
+    def _create_jws_parts(self, payload: str, algorithm: str) -> tuple[str, str, str]:
+        """Helper to create JWS flattened-JSON parts (protected_b64, payload_b64, sig_b64).
+
+        EC signatures are returned in IEEE P1363 format (r || s) as required by JWS.
+        """
         from cryptography.hazmat.primitives import hashes
 
-        # Create protected header
         protected = {"alg": algorithm}
         protected_b64 = _base64url_encode(json.dumps(protected).encode())
-
-        # Sign the payload
         sign_input = f"{protected_b64}.{payload}".encode()
 
         if algorithm == "RS256":
-            signature = self.private_key.sign(
+            sig_der = self.private_key.sign(
                 sign_input, padding.PKCS1v15(), hashes.SHA256()
             )
+            sig_b64 = _base64url_encode(sig_der)
         elif algorithm == "ES256":
-            signature = self.ec_private_key.sign(sign_input, ec.ECDSA(hashes.SHA256()))
+            # DER signature from cryptography — convert to IEEE P1363 (r || s)
+            sig_der = self.ec_private_key.sign(sign_input, ec.ECDSA(hashes.SHA256()))
+            r, s = decode_dss_signature(sig_der)
+            sig_p1363 = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+            sig_b64 = _base64url_encode(sig_p1363)
         else:
             raise ValueError(f"Unsupported algorithm: {algorithm}")
 
-        signature_b64 = _base64url_encode(signature)
-
-        return f"{protected_b64}.{payload}.{signature_b64}"
+        return protected_b64, payload, sig_b64
 
     def test_verify_jws_rs256(self):
         """Test JWS signature verification with RS256."""
         payload = _base64url_encode(b'{"test": "data"}')
-        jws = self._create_jws(payload, "RS256")
+        protected_b64, payload_b64, sig_b64 = self._create_jws_parts(payload, "RS256")
 
-        result = _verify_jws_signature(jws, self.public_key, "RS256")
-        self.assertTrue(result)
+        # Should not raise
+        _verify_jws_signature(
+            protected_b64, payload_b64, sig_b64, self.public_key, "RS256"
+        )
 
     def test_verify_jws_es256(self):
         """Test JWS signature verification with ES256."""
-
-        # Generate EC key for this test
         ec_private_key = ec.generate_private_key(
             ec.SECP256R1(), backend=default_backend()
         )
         ec_public_key = ec_private_key.public_key()
 
         payload = _base64url_encode(b'{"test": "data"}')
-
-        # Create JWS with EC key
         protected = {"alg": "ES256"}
         protected_b64 = _base64url_encode(json.dumps(protected).encode())
         sign_input = f"{protected_b64}.{payload}".encode()
-        signature = ec_private_key.sign(sign_input, ec.ECDSA(hashes.SHA256()))
-        signature_b64 = _base64url_encode(signature)
-        jws = f"{protected_b64}.{payload}.{signature_b64}"
 
-        result = _verify_jws_signature(jws, ec_public_key, "ES256")
-        self.assertTrue(result)
+        # DER → P1363
+        sig_der = ec_private_key.sign(sign_input, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(sig_der)
+        sig_p1363 = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        sig_b64 = _base64url_encode(sig_p1363)
+
+        # Should not raise
+        _verify_jws_signature(protected_b64, payload, sig_b64, ec_public_key, "ES256")
 
     def test_verify_jws_invalid_signature(self):
         """Test JWS signature verification with invalid signature."""
         payload = _base64url_encode(b'{"test": "data"}')
-        jws = self._create_jws(payload, "RS256")
+        protected_b64, payload_b64, _ = self._create_jws_parts(payload, "RS256")
+        bad_sig_b64 = _base64url_encode(b"invalid_signature" * 10)
 
-        # Modify the signature to make it invalid
-        parts = jws.split(".")
-        parts[2] = _base64url_encode(b"invalid_signature" * 10)
-        invalid_jws = ".".join(parts)
-
-        with self.assertRaises((ValueError, Exception)):
-            _verify_jws_signature(invalid_jws, self.public_key, "RS256")
+        with self.assertRaises(InvalidSignature):
+            _verify_jws_signature(
+                protected_b64, payload_b64, bad_sig_b64, self.public_key, "RS256"
+            )
 
     def test_verify_jws_invalid_format(self):
-        """Test JWS with invalid format."""
-        invalid_jws = "not.a.valid.jws"
+        """Test _verify_jws_signature raises on unsupported algorithm (replaces old format test)."""
+        payload = _base64url_encode(b'{"test": "data"}')
+        protected_b64, payload_b64, sig_b64 = self._create_jws_parts(payload, "RS256")
 
-        with self.assertRaises(ValueError) as context:
-            _verify_jws_signature(invalid_jws, self.public_key, "RS256")
-
-        self.assertIn("Invalid JWS format", str(context.exception))
+        with self.assertRaises(ValueError):
+            _verify_jws_signature(
+                protected_b64, payload_b64, sig_b64, self.public_key, "UNSUPPORTED"
+            )
 
     def test_verify_jws_unsupported_algorithm(self):
         """Test JWS with unsupported algorithm."""
         payload = _base64url_encode(b'{"test": "data"}')
-        jws = self._create_jws(payload, "RS256")
+        protected_b64, payload_b64, sig_b64 = self._create_jws_parts(payload, "RS256")
 
         with self.assertRaises(ValueError) as context:
-            _verify_jws_signature(jws, self.public_key, "UNSUPPORTED")
+            _verify_jws_signature(
+                protected_b64, payload_b64, sig_b64, self.public_key, "UNSUPPORTED"
+            )
 
         self.assertIn("Unsupported algorithm", str(context.exception))
 
@@ -283,6 +295,161 @@ class TestACMERequestParsing(unittest.TestCase):
         kid = "abc123"
         account_id = kid.split("/acme/account/")[-1]
         self.assertEqual(account_id, "abc123")
+
+
+class TestTLSALPN01Validation(unittest.IsolatedAsyncioTestCase):
+    """Tests for TLS-ALPN-01 validation (RFC 8737)."""
+
+    def _build_acme_cert(
+        self, domain: str, key_auth: str, correct_digest: bool = True
+    ) -> bytes:
+        """Build a minimal self-signed certificate with an acmeIdentifier extension.
+
+        Args:
+            domain: The DNS name to include in the SAN.
+            key_auth: The key authorization string whose SHA-256 is embedded.
+            correct_digest: When False, embed a zeroed digest to simulate failure.
+
+        Returns:
+            DER-encoded certificate bytes.
+        """
+        import cryptography.x509 as x509
+
+        key = rsa.generate_private_key(65537, 2048, default_backend())
+        digest = hashlib.sha256(key_auth.encode()).digest()
+        if not correct_digest:
+            digest = b"\x00" * 32
+        # RFC 8737: extension value is a DER OCTET STRING wrapping the digest
+        ext_value = bytes([0x04, 0x20]) + digest
+
+        acme_oid = x509.ObjectIdentifier("1.3.6.1.5.5.7.1.31")
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)]))
+            .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)]))
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.now(datetime.UTC))
+            .not_valid_after(
+                datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName(domain)]),
+                critical=False,
+            )
+            .add_extension(
+                x509.UnrecognizedExtension(acme_oid, ext_value),
+                critical=True,
+            )
+            .sign(key, hashes.SHA256(), default_backend())
+        )
+        return cert.public_bytes(serialization.Encoding.DER)
+
+    def _make_mock_connection(self, cert_der: bytes):
+        """Return (mock_reader, mock_writer) for asyncio.open_connection."""
+        mock_ssl_obj = MagicMock()
+        mock_ssl_obj.getpeercert.return_value = cert_der
+        mock_writer = MagicMock()
+        mock_writer.get_extra_info.return_value = mock_ssl_obj
+        mock_writer.wait_closed = AsyncMock()
+        mock_reader = MagicMock()
+        return mock_reader, mock_writer
+
+    async def test_tls_alpn01_valid_cert(self):
+        """Happy path: cert with correct acmeIdentifier → challenge status valid."""
+        domain = "example.com"
+        token = "testtoken"
+        thumbprint = "testthumbprint"
+        key_auth = f"{token}.{thumbprint}"
+
+        cert_der = self._build_acme_cert(domain, key_auth, correct_digest=True)
+        mock_reader, mock_writer = self._make_mock_connection(cert_der)
+
+        challenge = {
+            "type": "tls-alpn-01",
+            "token": token,
+            "key_authorization": key_auth,
+            "status": "processing",
+        }
+        auth = {"value": domain, "status": "processing", "order_id": None}
+        mock_storage = MagicMock()
+        mock_ra = MagicMock()
+        mock_ra.logger = MagicMock()
+
+        with patch(
+            "asyncio.open_connection",
+            AsyncMock(return_value=(mock_reader, mock_writer)),
+        ):
+            await _validate_tls_alpn01_async(
+                "auth1", challenge, auth, mock_storage, mock_ra
+            )
+
+        self.assertEqual(challenge["status"], "valid")
+        self.assertEqual(auth["status"], "valid")
+        mock_storage.update_authorization.assert_called_once()
+
+    async def test_tls_alpn01_wrong_digest(self):
+        """Wrong digest in acmeIdentifier → challenge status invalid."""
+        domain = "example.com"
+        token = "testtoken"
+        thumbprint = "testthumbprint"
+        key_auth = f"{token}.{thumbprint}"
+
+        # Build cert with zeroed digest (simulates attacker presenting wrong cert)
+        cert_der = self._build_acme_cert(domain, key_auth, correct_digest=False)
+        mock_reader, mock_writer = self._make_mock_connection(cert_der)
+
+        challenge = {
+            "type": "tls-alpn-01",
+            "token": token,
+            "key_authorization": key_auth,
+            "status": "processing",
+        }
+        auth = {"value": domain, "status": "processing", "order_id": None}
+        mock_storage = MagicMock()
+        mock_ra = MagicMock()
+        mock_ra.logger = MagicMock()
+
+        with patch(
+            "asyncio.open_connection",
+            AsyncMock(return_value=(mock_reader, mock_writer)),
+        ):
+            await _validate_tls_alpn01_async(
+                "auth1", challenge, auth, mock_storage, mock_ra
+            )
+
+        self.assertEqual(challenge["status"], "invalid")
+        self.assertEqual(auth["status"], "invalid")
+        mock_ra.logger.error.assert_called_once()
+
+    async def test_tls_alpn01_connection_error(self):
+        """Network failure → challenge status invalid, error logged."""
+        challenge = {
+            "type": "tls-alpn-01",
+            "token": "tok",
+            "key_authorization": "tok.thumb",
+            "status": "processing",
+        }
+        auth = {
+            "value": "unreachable.example.com",
+            "status": "processing",
+            "order_id": None,
+        }
+        mock_storage = MagicMock()
+        mock_ra = MagicMock()
+        mock_ra.logger = MagicMock()
+
+        with patch(
+            "asyncio.open_connection",
+            AsyncMock(side_effect=OSError("Connection refused")),
+        ):
+            await _validate_tls_alpn01_async(
+                "auth1", challenge, auth, mock_storage, mock_ra
+            )
+
+        self.assertEqual(challenge["status"], "invalid")
+        self.assertEqual(auth["status"], "invalid")
+        mock_ra.logger.error.assert_called_once()
 
 
 if __name__ == "__main__":

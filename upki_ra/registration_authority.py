@@ -19,6 +19,7 @@ from .core.upki_logger import UPKILogger
 from .utils.common import (
     ensure_directory,
     read_json_file,
+    write_file,
     write_json_file,
 )
 from .utils.tlsauth import CertificateValidator, TLSAuth
@@ -194,6 +195,26 @@ class RegistrationAuthority:
             self._config["registered"] = True
             self._config["ra_cn"] = cn
             self._save_config()
+
+            # Persist certificates returned by the CA so that is_registered() passes
+            cert_pem = response.get("certificate")
+            key_pem = response.get("private_key")
+            ca_pem = response.get("ca_certificate")
+
+            if cert_pem:
+                ra_cert_path = os.path.join(self.data_dir, "ra.crt")
+                write_file(ra_cert_path, cert_pem)
+                self.logger.info(f"RA certificate saved to {ra_cert_path}")
+
+            if key_pem:
+                ra_key_path = os.path.join(self.data_dir, "ra.key")
+                write_file(ra_key_path, key_pem, mode=0o600)
+                self.logger.info(f"RA private key saved to {ra_key_path}")
+
+            if ca_pem:
+                ca_cert_path = os.path.join(self.data_dir, "ca.crt")
+                write_file(ca_cert_path, ca_pem)
+                self.logger.info(f"CA certificate saved to {ca_cert_path}")
 
             self.logger.info(f"RA registered successfully: {cn}")
             return response

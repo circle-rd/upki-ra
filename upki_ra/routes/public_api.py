@@ -27,7 +27,7 @@ def create_public_routes(ra: RegistrationAuthority) -> APIRouter:
     Returns:
         Configured FastAPI APIRouter.
     """
-    router = APIRouter(prefix="/", tags=["public"])
+    router = APIRouter(prefix="", tags=["public"])
 
     # Pydantic models for request bodies
     class CertifyRequest(BaseModel):

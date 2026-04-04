@@ -30,7 +30,7 @@ def create_private_routes(ra: RegistrationAuthority) -> APIRouter:
     Returns:
         Configured FastAPI APIRouter.
     """
-    router = APIRouter(prefix="/", tags=["private"])
+    router = APIRouter(prefix="", tags=["private"])
 
     # Pydantic models for request bodies
     class RegisterNodeRequest(BaseModel):
