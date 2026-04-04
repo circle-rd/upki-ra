@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import ssl
 import uuid
 from base64 import b64decode, b64encode
 from datetime import UTC, datetime, timedelta
@@ -425,6 +426,99 @@ async def _validate_dns01_async(
             _advance_order_if_ready(order_id, storage)
 
 
+async def _validate_tls_alpn01_async(
+    auth_id: str,
+    challenge: dict[str, Any],
+    auth: dict[str, Any],
+    storage: AbstractStorage,
+    ra: RegistrationAuthority,
+) -> None:
+    """Perform real TLS-ALPN-01 validation (RFC 8737).
+
+    Connects to {domain}:443 with ALPN "acme-tls/1", presents no client
+    certificate, and verifies that the server's self-signed certificate:
+
+    1. Contains a SAN DNS entry for the domain.
+    2. Has the acmeIdentifier extension (OID 1.3.6.1.5.5.7.1.31) marked
+       critical, whose value is a DER OCTET STRING wrapping the SHA-256
+       digest of the key authorization.
+
+    Args:
+        auth_id: Authorization ID.
+        challenge: Challenge dict (mutated in-place).
+        auth: Authorization dict (mutated in-place).
+        storage: Storage backend.
+        ra: RegistrationAuthority for logging.
+    """
+    from cryptography.x509 import (
+        DNSName,
+        ObjectIdentifier,
+        SubjectAlternativeName,
+        UnrecognizedExtension,
+        load_der_x509_certificate,
+    )
+
+    domain = auth.get("value", "")
+    key_auth = challenge.get("key_authorization", "")
+    expected_digest = hashlib.sha256(key_auth.encode()).digest()
+
+    # OID for the acmeIdentifier X.509 extension (RFC 8737)
+    OID_ACME_IDENTIFIER = ObjectIdentifier("1.3.6.1.5.5.7.1.31")
+
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.set_alpn_protocols(["acme-tls/1"])
+
+        reader, writer = await asyncio.open_connection(domain, 443, ssl=ctx)
+        ssl_obj = writer.get_extra_info("ssl_object")
+        cert_der = ssl_obj.getpeercert(binary_form=True)
+        writer.close()
+        await writer.wait_closed()
+
+        cert = load_der_x509_certificate(cert_der)
+
+        # 1. SAN must contain the domain
+        san_ext = cert.extensions.get_extension_for_class(SubjectAlternativeName)
+        dns_names = [n.value for n in san_ext.value if isinstance(n, DNSName)]
+        if domain not in dns_names:
+            raise ValueError(f"SAN mismatch: {domain!r} not in {dns_names}")
+
+        # 2. acmeIdentifier extension must be critical
+        acme_ext = cert.extensions.get_extension_for_oid(OID_ACME_IDENTIFIER)
+        if not acme_ext.critical:
+            raise ValueError("acmeIdentifier extension must be critical")
+
+        # Extension value is a DER OCTET STRING (tag=0x04, len=0x20=32)
+        # wrapping the SHA-256 digest (RFC 8737 §3).
+        unrecognized: UnrecognizedExtension = acme_ext.value  # type: ignore[assignment]
+        ext_raw: bytes = unrecognized.value
+        if len(ext_raw) != 34 or ext_raw[0] != 0x04 or ext_raw[1] != 0x20:
+            raise ValueError(
+                f"Invalid acmeIdentifier encoding (len={len(ext_raw)}, "
+                f"tag=0x{ext_raw[0]:02x})"
+            )
+        actual_digest = ext_raw[2:]
+        if actual_digest != expected_digest:
+            raise ValueError("acmeIdentifier digest mismatch")
+
+        challenge["status"] = "valid"
+        auth["status"] = "valid"
+
+    except Exception as exc:
+        challenge["status"] = "invalid"
+        auth["status"] = "invalid"
+        ra.logger.error(f"TLS-ALPN-01 error for {domain}: {exc}")
+
+    storage.update_authorization(auth_id, auth)
+
+    if auth.get("status") == "valid":
+        order_id = auth.get("order_id")
+        if order_id:
+            _advance_order_if_ready(order_id, storage)
+
+
 def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     """Create ACME v2 routes.
 
@@ -642,6 +736,13 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                             "authorization_id": auth_id,
                             "dns_name": f"_acme-challenge.{domain}",
                         },
+                        {
+                            "type": "tls-alpn-01",
+                            "url": f"{base}/acme/challenge/{auth_id}/tls-alpn-01",
+                            "token": uuid.uuid4().hex,
+                            "status": "pending",
+                            "authorization_id": auth_id,
+                        },
                     ],
                     "expires": expires_at,
                 }
@@ -809,6 +910,61 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "type": "dns-01",
             "url": dns01["url"],
             "token": dns01["token"],
+            "status": "processing",
+        }
+
+    # =========================================================================
+    # TLS-ALPN-01 Challenge (RFC 8737)
+    # =========================================================================
+
+    @router.post("/acme/challenge/{auth_id}/tls-alpn-01")
+    async def trigger_tls_alpn01_challenge(auth_id: str, request: Request) -> dict:
+        """Client signals readiness for TLS-ALPN-01 validation (RFC 8737).
+
+        The RA connects to the domain on port 443 with ALPN "acme-tls/1" and
+        verifies the acmeIdentifier extension in the presented certificate.
+        """
+        raw = await request.body()
+        account_id, _ = validate_acme_jws(raw, storage)
+
+        auth = storage.get_authorization(auth_id)
+        if not auth:
+            raise HTTPException(status_code=404, detail="Authorization not found")
+        if auth.get("account_id") != account_id:
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+        tls01 = next(
+            (c for c in auth.get("challenges", []) if c["type"] == "tls-alpn-01"), None
+        )
+        if not tls01:
+            raise HTTPException(
+                status_code=404, detail="TLS-ALPN-01 challenge not found"
+            )
+
+        if tls01.get("status") != "pending":
+            return {
+                "type": "tls-alpn-01",
+                "url": tls01["url"],
+                "token": tls01["token"],
+                "status": tls01["status"],
+            }
+
+        account = storage.get_account(account_id)
+        thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
+        key_auth = f"{tls01['token']}.{thumbprint}"
+
+        tls01["key_authorization"] = key_auth
+        tls01["status"] = "processing"
+        storage.update_authorization(auth_id, auth)
+
+        asyncio.create_task(
+            _validate_tls_alpn01_async(auth_id, tls01, auth, storage, ra)
+        )
+
+        return {
+            "type": "tls-alpn-01",
+            "url": tls01["url"],
+            "token": tls01["token"],
             "status": "processing",
         }
 
