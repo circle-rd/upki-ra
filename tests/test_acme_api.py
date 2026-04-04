@@ -4,7 +4,6 @@ uPKI RA Server - ACME API Unit Tests.
 Unit tests for ACME protocol functions (JWS, base64url, JWK handling).
 """
 
-import asyncio
 import datetime
 import hashlib
 import json
@@ -13,12 +12,12 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
-from cryptography.x509.oid import NameOID
-
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+from cryptography.x509.oid import NameOID
 
 from upki_ra.routes.acme_api import (
     _base64url_decode,
@@ -234,7 +233,7 @@ class TestJWSSignature(unittest.TestCase):
         protected_b64, payload_b64, _ = self._create_jws_parts(payload, "RS256")
         bad_sig_b64 = _base64url_encode(b"invalid_signature" * 10)
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(InvalidSignature):
             _verify_jws_signature(
                 protected_b64, payload_b64, bad_sig_b64, self.public_key, "RS256"
             )
@@ -330,9 +329,9 @@ class TestTLSALPN01Validation(unittest.IsolatedAsyncioTestCase):
             .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)]))
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+            .not_valid_before(datetime.datetime.now(datetime.UTC))
             .not_valid_after(
-                datetime.datetime.now(datetime.timezone.utc)
+                datetime.datetime.now(datetime.UTC)
                 + datetime.timedelta(days=1)
             )
             .add_extension(
