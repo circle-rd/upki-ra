@@ -331,8 +331,7 @@ class TestTLSALPN01Validation(unittest.IsolatedAsyncioTestCase):
             .serial_number(x509.random_serial_number())
             .not_valid_before(datetime.datetime.now(datetime.UTC))
             .not_valid_after(
-                datetime.datetime.now(datetime.UTC)
-                + datetime.timedelta(days=1)
+                datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)
             )
             .add_extension(
                 x509.SubjectAlternativeName([x509.DNSName(domain)]),
