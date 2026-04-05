@@ -149,13 +149,21 @@ def ca_process(work_dir: str) -> Generator[subprocess.Popen, None, None]:
     reg_ready = _wait_for_port("127.0.0.1", _REG_PORT)
     if not (ca_ready and reg_ready):
         proc.terminate()
-        proc.wait(timeout=5)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
         pytest.fail("CA process did not become ready within timeout")
 
     yield proc
 
     proc.terminate()
-    proc.wait(timeout=5)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 @pytest.fixture()
