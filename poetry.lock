@@ -1313,7 +1313,7 @@ tinydb = ">=4.8.2,<5.0.0"
 
 [package.source]
 type = "directory"
-url = "../upki"
+url = "../upki-ca"
 
 [[package]]
 name = "uvicorn"
@@ -1602,4 +1602,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<4.0.0"
-content-hash = "566c56227537646e15e59f84cc682dbb182531e63b53ec7c55dc8538e16caf5a"
+content-hash = "3afef08e7f7ae70a7258d9c0313240532cde9418fb016f0cfd7a9a46355e0d2b"
