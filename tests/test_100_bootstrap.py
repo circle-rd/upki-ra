@@ -28,10 +28,11 @@ import yaml
 # Paths to the two CLI entry points
 CA_SERVER_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-    "Circle",
-    "upki",
+    "upki-ca",
     "ca_server.py",
 )
+
+_CA_AVAILABLE = os.path.isfile(CA_SERVER_PATH)
 RA_SERVER_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "ra_server.py"
 )
@@ -177,6 +178,7 @@ def ra_dir(work_dir: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not _CA_AVAILABLE, reason="upki-ca not found at expected path")
 class TestRABootstrap:
     """End-to-end tests for ra_server.py start auto-bootstrap."""
 
