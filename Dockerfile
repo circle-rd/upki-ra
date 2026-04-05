@@ -21,7 +21,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"
 
-CMD ["uvicorn", "ra_server:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default command: auto-bootstrap (register if needed) then start server
+CMD ["python", "ra_server.py", "start"]
