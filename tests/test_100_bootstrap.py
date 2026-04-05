@@ -21,7 +21,6 @@ import sys
 import tempfile
 import time
 from collections.abc import Generator
-from typing import Optional
 
 import pytest
 import yaml

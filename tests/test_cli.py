@@ -13,10 +13,8 @@ License: MIT
 import argparse
 import os
 import shutil
-import sys
 import tempfile
 import unittest
-from io import StringIO
 from unittest.mock import MagicMock, patch
 
 
@@ -224,7 +222,7 @@ class TestCmdStart(unittest.TestCase):
 
         args = self._make_args(env_seed="seed")
 
-        with patch("ra_server.cmd_register", return_value=1) as mock_register, patch(
+        with patch("ra_server.cmd_register", return_value=1), patch(
             "ra_server.cmd_listen"
         ) as mock_listen:
             result = cmd_start(args, mock_ra)
