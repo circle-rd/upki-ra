@@ -201,7 +201,7 @@ def cmd_listen(args, ra: RegistrationAuthority) -> int:
         return 1
 
 
-def cmd_start(args, ra: RegistrationAuthority) -> int:
+def cmd_start(args: argparse.Namespace, ra: RegistrationAuthority) -> int:
     """Auto-bootstrap: register with CA if needed, then start the server.
 
     On **first boot** (no ``ra.crt``/``ra.key`` on the data volume):
