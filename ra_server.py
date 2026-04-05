@@ -201,6 +201,45 @@ def cmd_listen(args, ra: RegistrationAuthority) -> int:
         return 1
 
 
+def cmd_start(args, ra: RegistrationAuthority) -> int:
+    """Auto-bootstrap: register with CA if needed, then start the server.
+
+    On **first boot** (no ``ra.crt``/``ra.key`` on the data volume):
+      - Reads the registration seed from ``args.env_seed`` (set from the
+        ``UPKI_CA_SEED`` environment variable).
+      - Calls :func:`cmd_register` to enrol with the CA.
+
+    On **subsequent boots** (certs already present on the data volume):
+      - Skips registration and goes straight to :func:`cmd_listen`.
+
+    Args:
+        args: Command-line arguments.
+        ra: RegistrationAuthority instance.
+
+    Returns:
+        Exit code (0 for success, non-zero for failure).
+    """
+    if not ra.is_registered():
+        seed = getattr(args, "env_seed", None)
+        if not seed:
+            print(
+                "Error: RA is not registered and UPKI_CA_SEED is not set.",
+                file=sys.stderr,
+            )
+            print(
+                "Set the UPKI_CA_SEED environment variable with the CA registration seed.",
+                file=sys.stderr,
+            )
+            return 1
+        args.seed = seed
+        args.cn = getattr(args, "env_cn", "RA")
+        ret = cmd_register(args, ra)
+        if ret != 0:
+            return ret
+
+    return cmd_listen(args, ra)
+
+
 def cmd_crl(args, ra: RegistrationAuthority) -> int:
     """Update CRL from CA.
 
@@ -277,10 +316,42 @@ def main():
     # Listen command
     subparsers.add_parser("listen", help="Start RA server")
 
+    # Start command (default Docker entrypoint: register if needed, then listen)
+    subparsers.add_parser(
+        "start", help="Auto-bootstrap: register if needed, then start server"
+    )
+
     # CRL command
     subparsers.add_parser("crl", help="Update CRL")
 
     args = parser.parse_args()
+
+    # ── Environment variable overrides ────────────────────────────────────────
+    # CLI flags take precedence; env vars fill in when flags are at their defaults.
+    env_data_dir = os.environ.get("UPKI_DATA_DIR")
+    if env_data_dir and args.dir == RegistrationAuthority.DEFAULT_DATA_DIR:
+        args.dir = env_data_dir
+
+    env_ca_host = os.environ.get("UPKI_CA_HOST")
+    if env_ca_host:
+        args.ip = env_ca_host
+
+    env_ca_port = os.environ.get("UPKI_CA_PORT")
+    if env_ca_port:
+        args.port = int(env_ca_port)
+
+    env_ra_host = os.environ.get("UPKI_RA_HOST")
+    if env_ra_host:
+        args.web_ip = env_ra_host
+
+    env_ra_port = os.environ.get("UPKI_RA_PORT")
+    if env_ra_port:
+        args.web_port = int(env_ra_port)
+
+    # Seed and CN for auto-registration (used by the start command)
+    args.env_seed = os.environ.get("UPKI_CA_SEED")
+    args.env_cn = os.environ.get("UPKI_RA_CN", "RA")
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Create logger
     logger = get_logger(log_dir=args.dir)
@@ -300,13 +371,16 @@ def main():
         args.host = args.web_ip
         args.port = args.web_port
         return cmd_listen(args, ra)
+    elif args.command == "start" or args.command is None:
+        # start is the default when no subcommand is given
+        args.host = args.web_ip
+        args.port = args.web_port
+        return cmd_start(args, ra)
     elif args.command == "crl":
         return cmd_crl(args, ra)
     else:
-        # Default: start server
-        args.host = args.web_ip
-        args.port = args.web_port
-        return cmd_listen(args, ra)
+        parser.print_help()
+        return 1
 
 
 if __name__ == "__main__":
