@@ -452,5 +452,257 @@ class TestTLSALPN01Validation(unittest.IsolatedAsyncioTestCase):
         mock_ra.logger.error.assert_called_once()
 
 
+class TestACMEEndpointBehavior(unittest.TestCase):
+    """Integration-style tests for ACME endpoint response shapes.
+
+    These tests verify that the responses produced by the route handlers
+    match the RFC 8555 requirements introduced during the Traefik/LEGO
+    integration fix:
+    - /acme/directory  → meta.termsOfService present (not termsOfServiceAgreed)
+    - POST /acme/new-account → 201 with Location header
+    - POST /acme/new-order  → 201 with Location header
+    - GET /acme/cert/{id}   → Content-Type application/pem-certificate-chain
+    - GET /acme/cert/{id}   → body contains full chain (end-entity + CA)
+    """
+
+    def _make_ec_jwk(self) -> tuple[ec.EllipticCurvePrivateKey, dict]:
+        """Generate an EC P-256 key and return (private_key, jwk_dict)."""
+        priv = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        pub = priv.public_key().public_numbers()
+        jwk = {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": _base64url_encode(pub.x.to_bytes(32, "big")),
+            "y": _base64url_encode(pub.y.to_bytes(32, "big")),
+        }
+        return priv, jwk
+
+    def _sign_jws(
+        self,
+        priv: ec.EllipticCurvePrivateKey,
+        payload: dict | None,
+        protected_extra: dict,
+    ) -> bytes:
+        """Build a minimal flattened JWS body signed with ES256."""
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+        payload_b64 = (
+            _base64url_encode(json.dumps(payload).encode()) if payload is not None else ""
+        )
+        protected = {"alg": "ES256", **protected_extra}
+        protected_b64 = _base64url_encode(json.dumps(protected, separators=(",", ":")).encode())
+        sign_input = f"{protected_b64}.{payload_b64}".encode()
+
+        sig_der = priv.sign(sign_input, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(sig_der)
+        sig_b64 = _base64url_encode(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
+
+        return json.dumps(
+            {"protected": protected_b64, "payload": payload_b64, "signature": sig_b64}
+        ).encode()
+
+    def _make_app_with_storage(self) -> tuple:
+        """Spin up a FastAPI test client backed by a real SQLite database in a temp dir."""
+        import tempfile
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from upki_ra.routes.acme_api import create_acme_routes
+
+        tmp = tempfile.mkdtemp()
+        mock_ra = MagicMock()
+        mock_ra.data_dir = tmp
+        mock_ra.logger = MagicMock()
+        mock_ra.get_ca_certificate.return_value = (
+            "-----BEGIN CERTIFICATE-----\nCA_CERT_DATA\n-----END CERTIFICATE-----\n"
+        )
+        mock_ra.zmq_client.sign_csr.return_value = {
+            "certificate": (
+                "-----BEGIN CERTIFICATE-----\nEE_CERT_DATA\n-----END CERTIFICATE-----\n"
+            )
+        }
+
+        app = FastAPI()
+        app.include_router(create_acme_routes(mock_ra))
+        client = TestClient(app, raise_server_exceptions=True)
+        return client, mock_ra, tmp
+
+    def test_acme_directory_has_terms_of_service_url(self):
+        """ACME directory must use meta.termsOfService, not meta.termsOfServiceAgreed."""
+        client, _, tmp = self._make_app_with_storage()
+        try:
+            resp = client.get("/acme/directory")
+            self.assertEqual(resp.status_code, 200)
+            body = resp.json()
+            meta = body.get("meta", {})
+            self.assertIn(
+                "termsOfService",
+                meta,
+                "meta must contain 'termsOfService' (RFC 8555 §7.1.1)",
+            )
+            self.assertNotIn(
+                "termsOfServiceAgreed",
+                meta,
+                "'termsOfServiceAgreed' is a client field, not a server field",
+            )
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_new_account_returns_location_header(self):
+        """POST /acme/new-account must return a Location header (RFC 8555 §7.3)."""
+        client, _, tmp = self._make_app_with_storage()
+        try:
+            # First get a nonce
+            nonce_resp = client.get("/acme/new-nonce")
+            nonce = nonce_resp.headers["Replay-Nonce"]
+
+            priv, jwk = self._make_ec_jwk()
+            body = self._sign_jws(
+                priv,
+                {"termsOfServiceAgreed": True, "contact": []},
+                {"nonce": nonce, "url": "http://testserver/acme/new-account", "jwk": jwk},
+            )
+            resp = client.post(
+                "/acme/new-account",
+                content=body,
+                headers={"Content-Type": "application/jose+json"},
+            )
+            self.assertIn(resp.status_code, (200, 201))
+            self.assertIn(
+                "Location",
+                resp.headers,
+                "new-account response must include a Location header (RFC 8555 §7.3)",
+            )
+            self.assertIn("/acme/account/", resp.headers["Location"])
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_new_order_returns_location_header(self):
+        """POST /acme/new-order must return a Location header (RFC 8555 §7.4)."""
+        client, _, tmp = self._make_app_with_storage()
+        try:
+            # Register account first
+            nonce_resp = client.get("/acme/new-nonce")
+            nonce = nonce_resp.headers["Replay-Nonce"]
+            priv, jwk = self._make_ec_jwk()
+            from upki_ra.routes.acme_api import _compute_key_thumbprint
+
+            thumbprint = _compute_key_thumbprint(jwk)
+            reg_body = self._sign_jws(
+                priv,
+                {"termsOfServiceAgreed": True, "contact": []},
+                {"nonce": nonce, "url": "http://testserver/acme/new-account", "jwk": jwk},
+            )
+            client.post(
+                "/acme/new-account",
+                content=reg_body,
+                headers={"Content-Type": "application/jose+json"},
+            )
+
+            # Now create an order
+            nonce_resp2 = client.get("/acme/new-nonce")
+            nonce2 = nonce_resp2.headers["Replay-Nonce"]
+            kid = f"http://testserver/acme/account/{thumbprint}"
+            order_body = self._sign_jws(
+                priv,
+                {"identifiers": [{"type": "dns", "value": "example.com"}]},
+                {"nonce": nonce2, "url": "http://testserver/acme/new-order", "kid": kid},
+            )
+            resp = client.post(
+                "/acme/new-order",
+                content=order_body,
+                headers={"Content-Type": "application/jose+json"},
+            )
+            self.assertIn(resp.status_code, (200, 201))
+            self.assertIn(
+                "Location",
+                resp.headers,
+                "new-order response must include a Location header (RFC 8555 §7.4)",
+            )
+            self.assertIn("/acme/order/", resp.headers["Location"])
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_download_cert_returns_pem_content_type(self):
+        """GET /acme/cert/{id} must return Content-Type application/pem-certificate-chain."""
+        client, mock_ra, tmp = self._make_app_with_storage()
+        try:
+            # Inject a fake valid order directly into storage.
+            # A dummy account must be created first to satisfy the FK constraint.
+            from upki_ra.storage import SQLiteStorage
+
+            storage = SQLiteStorage(tmp)
+            storage.initialize()
+            # FK: orders.account_id → accounts.id
+            storage.save_account("acct-pem", {"id": "acct-pem", "status": "valid"})
+            storage.save_order(
+                "testorder",
+                {
+                    "id": "testorder",
+                    "account_id": "acct-pem",
+                    "status": "valid",
+                    "certificate": (
+                        "-----BEGIN CERTIFICATE-----\nDATA\n-----END CERTIFICATE-----\n"
+                    ),
+                    "certificate_url": "http://testserver/acme/cert/testorder",
+                },
+            )
+            resp = client.get("/acme/cert/testorder")
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn(
+                "application/pem-certificate-chain",
+                resp.headers.get("content-type", ""),
+                "certificate download must use application/pem-certificate-chain content-type",
+            )
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_download_cert_includes_full_chain(self):
+        """GET /acme/cert/{id} body must contain both end-entity and CA certificates."""
+        client, mock_ra, tmp = self._make_app_with_storage()
+        try:
+            from upki_ra.storage import SQLiteStorage
+
+            chain = (
+                "-----BEGIN CERTIFICATE-----\nEE_DATA\n-----END CERTIFICATE-----\n"
+                "-----BEGIN CERTIFICATE-----\nCA_DATA\n-----END CERTIFICATE-----\n"
+            )
+            storage = SQLiteStorage(tmp)
+            storage.initialize()
+            # FK: orders.account_id → accounts.id
+            storage.save_account("acct-chain", {"id": "acct-chain", "status": "valid"})
+            storage.save_order(
+                "chainorder",
+                {
+                    "id": "chainorder",
+                    "account_id": "acct-chain",
+                    "status": "valid",
+                    "certificate": chain,
+                    "certificate_url": "http://testserver/acme/cert/chainorder",
+                },
+            )
+            resp = client.get("/acme/cert/chainorder")
+            self.assertEqual(resp.status_code, 200)
+            cert_count = resp.text.count("BEGIN CERTIFICATE")
+            self.assertGreaterEqual(
+                cert_count,
+                2,
+                "Certificate chain must contain at least 2 PEM blocks (end-entity + CA)",
+            )
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

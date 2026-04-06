@@ -464,13 +464,23 @@ class RegistrationClient(ZMQClient):
             host=host, port=self.DEFAULT_PORT, timeout=timeout, logger=logger
         )
 
-    def register_ra(self, seed: str, cn: str, profile: str = "ra") -> dict[str, Any]:
+    def register_ra(
+        self,
+        seed: str,
+        cn: str,
+        profile: str = "ra",
+        sans: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         """Register RA with CA server.
 
         Args:
             seed: Registration seed for validation.
             cn: Common Name for the RA node.
             profile: Certificate profile (default: ra).
+            sans: Optional Subject Alternative Names for the RA certificate,
+                e.g. ``[{"type": "DNS", "value": "upki-ra"}]``.  Required
+                when the RA serves HTTPS (Go 1.15+ ignores the CN for host
+                validation).
 
         Returns:
             Registration response dictionary.
@@ -479,9 +489,10 @@ class RegistrationClient(ZMQClient):
             CAConnectionError: If communication fails.
             UPKIError: If CA returns an error.
         """
-        response = self._send_message(
-            "register", {"seed": seed, "cn": cn, "profile": profile}
-        )
+        payload: dict[str, Any] = {"seed": seed, "cn": cn, "profile": profile}
+        if sans:
+            payload["sans"] = sans
+        response = self._send_message("register", payload)
         return response.get("DATA", {})
 
     def get_status(self) -> dict[str, Any]:

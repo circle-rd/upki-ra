@@ -32,7 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from cryptography.x509 import load_der_x509_csr, load_pem_x509_certificate
 from cryptography.x509.oid import NameOID
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..registration_authority import RegistrationAuthority
 from ..storage import AbstractStorage, SQLiteStorage
@@ -537,7 +537,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # =========================================================================
 
     @router.get("/acme/directory")
-    async def get_acme_directory(request: Request) -> dict:
+    async def get_acme_directory(request: Request) -> dict:  # type: ignore[return]
         """Return the ACME directory object."""
         base = str(request.base_url).rstrip("/")
         return {
@@ -546,7 +546,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "newOrder": f"{base}/acme/new-order",
             "revokeCert": f"{base}/acme/revoke-cert",
             "keyChange": f"{base}/acme/key-change",
-            "meta": {"termsOfServiceAgreed": True},
+            "meta": {"termsOfService": "about:blank"},
         }
 
     # =========================================================================
@@ -578,7 +578,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # =========================================================================
 
     @router.post("/acme/new-account", status_code=201)
-    async def create_acme_account(request: Request) -> dict:
+    async def create_acme_account(request: Request) -> JSONResponse:
         """Create or return an existing ACME account.
 
         The request body MUST be a flattened JWS with the account's public key
@@ -637,11 +637,22 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         existing = storage.get_account_by_jwk(jwk)
         if existing:
-            return {
-                "status": "valid",
-                "contact": existing.get("contact", []),
-                "termsOfServiceAgreed": True,
-            }
+            existing_id = existing.get("id", _compute_key_thumbprint(jwk))
+            nonce = uuid.uuid4().hex
+            storage.add_nonce(nonce)
+            base = str(request.base_url).rstrip("/")
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "valid",
+                    "contact": existing.get("contact", []),
+                    "termsOfServiceAgreed": True,
+                },
+                headers={
+                    "Location": f"{base}/acme/account/{existing_id}",
+                    "Replay-Nonce": nonce,
+                },
+            )
 
         account_id = _compute_key_thumbprint(jwk)
         account: dict[str, Any] = {
@@ -654,18 +665,28 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         }
         storage.save_account(account_id, account)
 
-        return {
-            "status": "valid",
-            "contact": account["contact"],
-            "termsOfServiceAgreed": True,
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        base = str(request.base_url).rstrip("/")
+        return JSONResponse(
+            status_code=201,
+            content={
+                "status": "valid",
+                "contact": account["contact"],
+                "termsOfServiceAgreed": True,
+            },
+            headers={
+                "Location": f"{base}/acme/account/{account_id}",
+                "Replay-Nonce": nonce,
+            },
+        )
 
     # =========================================================================
     # Order (RFC 8555 §7.4)
     # =========================================================================
 
     @router.post("/acme/new-order", status_code=201)
-    async def create_acme_order(request: Request) -> dict:
+    async def create_acme_order(request: Request) -> JSONResponse:
         """Create a new certificate order.
 
         Clients authenticated via mTLS (X-SSL-CLIENT-VERIFY: SUCCESS) are
@@ -694,7 +715,14 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         order_id = uuid.uuid4().hex
         base = str(request.base_url).rstrip("/")
         auth_urls: list[str] = []
-        expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z"
+        expires_at = (datetime.now(UTC) + timedelta(days=7)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        # Collect all authorization dicts first (without saving yet).
+        # The order must be persisted before the authorizations because the
+        # authorizations table has a FK constraint on orders.id.
+        pending_auths: list[tuple[str, dict[str, Any]]] = []
 
         for ident in identifiers:
             auth_id = uuid.uuid4().hex
@@ -746,7 +774,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                     "expires": expires_at,
                 }
 
-            storage.save_authorization(auth_id, auth)
+            pending_auths.append((auth_id, auth))
             auth_urls.append(f"{base}/acme/authz/{auth_id}")
 
         order_status = "ready" if pre_authorized else "pending"
@@ -762,16 +790,28 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "notAfter": body.get("notAfter"),
             "created_at": datetime.now(UTC).isoformat(),
         }
+        # Save order FIRST so the FK constraint on authorizations is satisfied.
         storage.save_order(order_id, order)
+        for auth_id, auth in pending_auths:
+            storage.save_authorization(auth_id, auth)
 
-        return {
-            "status": order_status,
-            "identifiers": identifiers,
-            "authorizations": auth_urls,
-            "finalize": order["finalize"],
-            "notBefore": body.get("notBefore"),
-            "notAfter": body.get("notAfter"),
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            status_code=201,
+            content={
+                "status": order_status,
+                "identifiers": identifiers,
+                "authorizations": auth_urls,
+                "finalize": order["finalize"],
+                "notBefore": body.get("notBefore"),
+                "notAfter": body.get("notAfter"),
+            },
+            headers={
+                "Location": f"{base}/acme/order/{order_id}",
+                "Replay-Nonce": nonce,
+            },
+        )
 
     @router.get("/acme/order/{order_id}")
     async def get_order(order_id: str) -> dict:
@@ -788,6 +828,31 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "error": order.get("error"),
         }
 
+    @router.post("/acme/order/{order_id}")
+    async def get_order_post(order_id: str, request: Request) -> JSONResponse:
+        """POST-as-GET for order status polling (RFC 8555 §7.4 + §6.3).
+
+        LEGO uses POST-as-GET (empty JWS payload) to poll the order object.
+        """
+        raw = await request.body()
+        validate_acme_jws(raw, storage)
+        order = storage.get_order(order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "status": order["status"],
+                "identifiers": order.get("identifiers", []),
+                "authorizations": order.get("authorizations", []),
+                "finalize": order.get("finalize", ""),
+                "certificate": order.get("certificate_url"),
+                "error": order.get("error"),
+            },
+            headers={"Replay-Nonce": nonce},
+        )
+
     # =========================================================================
     # Authorization (RFC 8555 §7.5)
     # =========================================================================
@@ -803,10 +868,39 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "status": auth["status"],
             "expires": auth.get(
                 "expires",
-                (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z",
+                (datetime.now(UTC) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             ),
             "challenges": auth.get("challenges", []),
         }
+
+    @router.post("/acme/authz/{auth_id}")
+    async def get_authorization_post(auth_id: str, request: Request) -> JSONResponse:
+        """POST-as-GET for authorization status (RFC 8555 §7.5 + §6.3).
+
+        LEGO uses POST-as-GET (empty JWS payload) to fetch and poll authorization
+        objects instead of plain GET.
+        """
+        raw = await request.body()
+        validate_acme_jws(raw, storage)
+        auth = storage.get_authorization(auth_id)
+        if not auth:
+            raise HTTPException(status_code=404, detail="Authorization not found")
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "identifier": {"type": auth["type"], "value": auth["value"]},
+                "status": auth["status"],
+                "expires": auth.get(
+                    "expires",
+                    (datetime.now(UTC) + timedelta(days=7)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                ),
+                "challenges": auth.get("challenges", []),
+            },
+            headers={"Replay-Nonce": nonce},
+        )
 
     # =========================================================================
     # HTTP-01 Challenge (RFC 8555 §8.3)
@@ -827,6 +921,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """Client signals readiness for HTTP-01 validation."""
         raw = await request.body()
         account_id, _ = validate_acme_jws(raw, storage)
+        base = str(request.base_url).rstrip("/")
 
         auth = storage.get_authorization(auth_id)
         if not auth:
@@ -841,12 +936,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             raise HTTPException(status_code=404, detail="HTTP-01 challenge not found")
 
         if http01.get("status") != "pending":
-            return {
-                "type": "http-01",
-                "url": http01["url"],
-                "token": http01["token"],
-                "status": http01["status"],
-            }
+            base = str(request.base_url).rstrip("/")
+            nonce = uuid.uuid4().hex
+            storage.add_nonce(nonce)
+            return JSONResponse(
+                content={
+                    "type": "http-01",
+                    "url": http01["url"],
+                    "token": http01["token"],
+                    "status": http01["status"],
+                },
+                headers={
+                    "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                    "Replay-Nonce": nonce,
+                },
+            )
 
         account = storage.get_account(account_id)
         thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
@@ -856,12 +960,20 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         asyncio.create_task(_validate_http01_async(auth_id, http01, auth, storage, ra))
 
-        return {
-            "type": "http-01",
-            "url": http01["url"],
-            "token": http01["token"],
-            "status": "processing",
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "type": "http-01",
+                "url": http01["url"],
+                "token": http01["token"],
+                "status": "processing",
+            },
+            headers={
+                "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                "Replay-Nonce": nonce,
+            },
+        )
 
     # =========================================================================
     # DNS-01 Challenge (RFC 8555 §8.4)
@@ -872,6 +984,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """Client signals readiness for DNS-01 validation."""
         raw = await request.body()
         account_id, _ = validate_acme_jws(raw, storage)
+        base = str(request.base_url).rstrip("/")
 
         auth = storage.get_authorization(auth_id)
         if not auth:
@@ -886,12 +999,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             raise HTTPException(status_code=404, detail="DNS-01 challenge not found")
 
         if dns01.get("status") != "pending":
-            return {
-                "type": "dns-01",
-                "url": dns01["url"],
-                "token": dns01["token"],
-                "status": dns01["status"],
-            }
+            base = str(request.base_url).rstrip("/")
+            nonce = uuid.uuid4().hex
+            storage.add_nonce(nonce)
+            return JSONResponse(
+                content={
+                    "type": "dns-01",
+                    "url": dns01["url"],
+                    "token": dns01["token"],
+                    "status": dns01["status"],
+                },
+                headers={
+                    "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                    "Replay-Nonce": nonce,
+                },
+            )
 
         account = storage.get_account(account_id)
         thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
@@ -905,12 +1027,20 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         asyncio.create_task(_validate_dns01_async(auth_id, dns01, auth, storage, ra))
 
-        return {
-            "type": "dns-01",
-            "url": dns01["url"],
-            "token": dns01["token"],
-            "status": "processing",
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "type": "dns-01",
+                "url": dns01["url"],
+                "token": dns01["token"],
+                "status": "processing",
+            },
+            headers={
+                "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                "Replay-Nonce": nonce,
+            },
+        )
 
     # =========================================================================
     # TLS-ALPN-01 Challenge (RFC 8737)
@@ -925,6 +1055,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """
         raw = await request.body()
         account_id, _ = validate_acme_jws(raw, storage)
+        base = str(request.base_url).rstrip("/")
 
         auth = storage.get_authorization(auth_id)
         if not auth:
@@ -941,12 +1072,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             )
 
         if tls01.get("status") != "pending":
-            return {
-                "type": "tls-alpn-01",
-                "url": tls01["url"],
-                "token": tls01["token"],
-                "status": tls01["status"],
-            }
+            base = str(request.base_url).rstrip("/")
+            nonce = uuid.uuid4().hex
+            storage.add_nonce(nonce)
+            return JSONResponse(
+                content={
+                    "type": "tls-alpn-01",
+                    "url": tls01["url"],
+                    "token": tls01["token"],
+                    "status": tls01["status"],
+                },
+                headers={
+                    "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                    "Replay-Nonce": nonce,
+                },
+            )
 
         account = storage.get_account(account_id)
         thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
@@ -960,19 +1100,27 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             _validate_tls_alpn01_async(auth_id, tls01, auth, storage, ra)
         )
 
-        return {
-            "type": "tls-alpn-01",
-            "url": tls01["url"],
-            "token": tls01["token"],
-            "status": "processing",
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "type": "tls-alpn-01",
+                "url": tls01["url"],
+                "token": tls01["token"],
+                "status": "processing",
+            },
+            headers={
+                "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                "Replay-Nonce": nonce,
+            },
+        )
 
     # =========================================================================
     # Order finalization (RFC 8555 §7.4)
     # =========================================================================
 
     @router.post("/acme/order/{order_id}/finalize")
-    async def finalize_order(order_id: str, request: Request) -> dict:
+    async def finalize_order(order_id: str, request: Request) -> JSONResponse:
         """Finalize an order by submitting a CSR.
 
         The order MUST be in the ready state. The server transitions through
@@ -1037,6 +1185,18 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                 detail=exc_str if profile_error else "Certificate issuance failed",
             ) from exc
 
+        # Append CA certificate to form a full chain (required by RFC 8555 §7.4.2).
+        try:
+            ca_pem = ra.get_ca_certificate()
+            if ca_pem:
+                if not certificate.endswith("\n"):
+                    certificate += "\n"
+                certificate += ca_pem
+        except Exception as exc:
+            ra.logger.warning(
+                f"ACME finalize: could not fetch CA cert for chain: {exc}"
+            )
+
         base = str(request.base_url).rstrip("/")
         cert_url = f"{base}/acme/cert/{order_id}"
         order["status"] = "valid"
@@ -1044,24 +1204,31 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         order["certificate_url"] = cert_url
         storage.update_order(order_id, order)
 
-        return {"status": "valid", "certificate": cert_url}
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={"status": "valid", "certificate": cert_url},
+            headers={"Replay-Nonce": nonce},
+        )
 
     # =========================================================================
     # Certificate download (RFC 8555 §7.4.2)
     # =========================================================================
 
-    @router.get("/acme/cert/{cert_id}")
-    async def download_certificate(cert_id: str) -> dict:
-        """Return the issued certificate for a valid order."""
+    @router.api_route("/acme/cert/{cert_id}", methods=["GET", "POST"])
+    async def download_certificate(cert_id: str, request: Request) -> Response:
+        """Return the issued certificate for a valid order (POST-as-GET per RFC 8555 §7.4.2)."""
         order = storage.get_order(cert_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
         if order.get("status") != "valid":
             raise HTTPException(status_code=400, detail="Certificate not yet available")
-        certificate = order.get("certificate", "")
-        if not certificate:
+        pem_chain = order.get("certificate", "")
+        if not pem_chain:
             raise HTTPException(status_code=404, detail="Certificate not found")
-        return {"certificate": certificate}
+        return Response(
+            content=pem_chain, media_type="application/pem-certificate-chain"
+        )
 
     # =========================================================================
     # Revocation (RFC 8555 §7.6)

@@ -167,12 +167,19 @@ class RegistrationAuthority:
     # Registration
     # -------------------------------------------------------------------------
 
-    def register_with_ca(self, seed: str, cn: str) -> dict[str, Any]:
+    def register_with_ca(
+        self,
+        seed: str,
+        cn: str,
+        sans: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         """Register RA with CA server.
 
         Args:
             seed: Registration seed.
             cn: RA Common Name.
+            sans: Optional Subject Alternative Names for the RA TLS certificate.
+                Example: ``[{"type": "DNS", "value": "upki-ra"}]``.
 
         Returns:
             Registration response data.
@@ -189,7 +196,9 @@ class RegistrationAuthority:
         try:
             self.logger.info(f"Registering RA with CA: {cn}")
 
-            response = self.reg_client.register_ra(seed=seed, cn=cn, profile="ra")
+            response = self.reg_client.register_ra(
+                seed=seed, cn=cn, profile="ra", sans=sans
+            )
 
             # Save registration status
             self._config["registered"] = True
