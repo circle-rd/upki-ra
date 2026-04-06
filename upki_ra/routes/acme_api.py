@@ -818,6 +818,31 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "error": order.get("error"),
         }
 
+    @router.post("/acme/order/{order_id}")
+    async def get_order_post(order_id: str, request: Request) -> JSONResponse:
+        """POST-as-GET for order status polling (RFC 8555 §7.4 + §6.3).
+
+        LEGO uses POST-as-GET (empty JWS payload) to poll the order object.
+        """
+        raw = await request.body()
+        validate_acme_jws(raw, storage)
+        order = storage.get_order(order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "status": order["status"],
+                "identifiers": order.get("identifiers", []),
+                "authorizations": order.get("authorizations", []),
+                "finalize": order.get("finalize", ""),
+                "certificate": order.get("certificate_url"),
+                "error": order.get("error"),
+            },
+            headers={"Replay-Nonce": nonce},
+        )
+
     # =========================================================================
     # Authorization (RFC 8555 §7.5)
     # =========================================================================
@@ -837,6 +862,33 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             ),
             "challenges": auth.get("challenges", []),
         }
+
+    @router.post("/acme/authz/{auth_id}")
+    async def get_authorization_post(auth_id: str, request: Request) -> JSONResponse:
+        """POST-as-GET for authorization status (RFC 8555 §7.5 + §6.3).
+
+        LEGO uses POST-as-GET (empty JWS payload) to fetch and poll authorization
+        objects instead of plain GET.
+        """
+        raw = await request.body()
+        validate_acme_jws(raw, storage)
+        auth = storage.get_authorization(auth_id)
+        if not auth:
+            raise HTTPException(status_code=404, detail="Authorization not found")
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "identifier": {"type": auth["type"], "value": auth["value"]},
+                "status": auth["status"],
+                "expires": auth.get(
+                    "expires",
+                    (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z",
+                ),
+                "challenges": auth.get("challenges", []),
+            },
+            headers={"Replay-Nonce": nonce},
+        )
 
     # =========================================================================
     # HTTP-01 Challenge (RFC 8555 §8.3)
