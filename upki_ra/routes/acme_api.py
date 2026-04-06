@@ -715,7 +715,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         order_id = uuid.uuid4().hex
         base = str(request.base_url).rstrip("/")
         auth_urls: list[str] = []
-        expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z"
+        expires_at = (datetime.now(UTC) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Collect all authorization dicts first (without saving yet).
         # The order must be persisted before the authorizations because the
@@ -866,7 +866,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "status": auth["status"],
             "expires": auth.get(
                 "expires",
-                (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z",
+                (datetime.now(UTC) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             ),
             "challenges": auth.get("challenges", []),
         }
@@ -891,7 +891,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                 "status": auth["status"],
                 "expires": auth.get(
                     "expires",
-                    (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z",
+                    (datetime.now(UTC) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 ),
                 "challenges": auth.get("challenges", []),
             },
