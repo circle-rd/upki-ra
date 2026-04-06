@@ -717,6 +717,11 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         auth_urls: list[str] = []
         expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat() + "Z"
 
+        # Collect all authorization dicts first (without saving yet).
+        # The order must be persisted before the authorizations because the
+        # authorizations table has a FK constraint on orders.id.
+        pending_auths: list[tuple[str, dict[str, Any]]] = []
+
         for ident in identifiers:
             auth_id = uuid.uuid4().hex
             domain = ident.get("value", "")
@@ -767,7 +772,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                     "expires": expires_at,
                 }
 
-            storage.save_authorization(auth_id, auth)
+            pending_auths.append((auth_id, auth))
             auth_urls.append(f"{base}/acme/authz/{auth_id}")
 
         order_status = "ready" if pre_authorized else "pending"
@@ -783,7 +788,10 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "notAfter": body.get("notAfter"),
             "created_at": datetime.now(UTC).isoformat(),
         }
+        # Save order FIRST so the FK constraint on authorizations is satisfied.
         storage.save_order(order_id, order)
+        for auth_id, auth in pending_auths:
+            storage.save_authorization(auth_id, auth)
 
         nonce = uuid.uuid4().hex
         storage.add_nonce(nonce)

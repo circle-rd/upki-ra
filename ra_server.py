@@ -61,8 +61,35 @@ def create_app(ra: RegistrationAuthority) -> FastAPI:
             content=error.to_dict(),
         )
 
+    @app.exception_handler(HTTPException)
+    async def handle_http_exception(request: Request, error: HTTPException):
+        # ACME endpoints must return RFC 7807 Problem Details with integer status
+        # (LEGO/Go unmarshals the 'status' field as int).
+        if request.url.path.startswith("/acme/"):
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "type": "urn:ietf:params:acme:error:malformed",
+                    "detail": str(error.detail),
+                    "status": error.status_code,
+                },
+            )
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"status": "error", "message": str(error.detail)},
+        )
+
     @app.exception_handler(404)
     async def handle_not_found(request: Request, error: Exception):
+        if request.url.path.startswith("/acme/"):
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "type": "urn:ietf:params:acme:error:malformed",
+                    "detail": "Not found",
+                    "status": 404,
+                },
+            )
         return JSONResponse(
             status_code=404,
             content={"status": "error", "message": "Not found"},
