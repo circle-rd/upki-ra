@@ -715,7 +715,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         order_id = uuid.uuid4().hex
         base = str(request.base_url).rstrip("/")
         auth_urls: list[str] = []
-        expires_at = (datetime.now(UTC) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        expires_at = (datetime.now(UTC) + timedelta(days=7)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
 
         # Collect all authorization dicts first (without saving yet).
         # The order must be persisted before the authorizations because the
@@ -891,7 +893,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                 "status": auth["status"],
                 "expires": auth.get(
                     "expires",
-                    (datetime.now(UTC) + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    (datetime.now(UTC) + timedelta(days=7)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
                 ),
                 "challenges": auth.get("challenges", []),
             },
@@ -917,6 +921,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """Client signals readiness for HTTP-01 validation."""
         raw = await request.body()
         account_id, _ = validate_acme_jws(raw, storage)
+        base = str(request.base_url).rstrip("/")
 
         auth = storage.get_authorization(auth_id)
         if not auth:
@@ -931,12 +936,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             raise HTTPException(status_code=404, detail="HTTP-01 challenge not found")
 
         if http01.get("status") != "pending":
-            return {
-                "type": "http-01",
-                "url": http01["url"],
-                "token": http01["token"],
-                "status": http01["status"],
-            }
+            base = str(request.base_url).rstrip("/")
+            nonce = uuid.uuid4().hex
+            storage.add_nonce(nonce)
+            return JSONResponse(
+                content={
+                    "type": "http-01",
+                    "url": http01["url"],
+                    "token": http01["token"],
+                    "status": http01["status"],
+                },
+                headers={
+                    "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                    "Replay-Nonce": nonce,
+                },
+            )
 
         account = storage.get_account(account_id)
         thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
@@ -946,12 +960,20 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         asyncio.create_task(_validate_http01_async(auth_id, http01, auth, storage, ra))
 
-        return {
-            "type": "http-01",
-            "url": http01["url"],
-            "token": http01["token"],
-            "status": "processing",
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "type": "http-01",
+                "url": http01["url"],
+                "token": http01["token"],
+                "status": "processing",
+            },
+            headers={
+                "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                "Replay-Nonce": nonce,
+            },
+        )
 
     # =========================================================================
     # DNS-01 Challenge (RFC 8555 §8.4)
@@ -962,6 +984,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """Client signals readiness for DNS-01 validation."""
         raw = await request.body()
         account_id, _ = validate_acme_jws(raw, storage)
+        base = str(request.base_url).rstrip("/")
 
         auth = storage.get_authorization(auth_id)
         if not auth:
@@ -976,12 +999,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             raise HTTPException(status_code=404, detail="DNS-01 challenge not found")
 
         if dns01.get("status") != "pending":
-            return {
-                "type": "dns-01",
-                "url": dns01["url"],
-                "token": dns01["token"],
-                "status": dns01["status"],
-            }
+            base = str(request.base_url).rstrip("/")
+            nonce = uuid.uuid4().hex
+            storage.add_nonce(nonce)
+            return JSONResponse(
+                content={
+                    "type": "dns-01",
+                    "url": dns01["url"],
+                    "token": dns01["token"],
+                    "status": dns01["status"],
+                },
+                headers={
+                    "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                    "Replay-Nonce": nonce,
+                },
+            )
 
         account = storage.get_account(account_id)
         thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
@@ -995,12 +1027,20 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         asyncio.create_task(_validate_dns01_async(auth_id, dns01, auth, storage, ra))
 
-        return {
-            "type": "dns-01",
-            "url": dns01["url"],
-            "token": dns01["token"],
-            "status": "processing",
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "type": "dns-01",
+                "url": dns01["url"],
+                "token": dns01["token"],
+                "status": "processing",
+            },
+            headers={
+                "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                "Replay-Nonce": nonce,
+            },
+        )
 
     # =========================================================================
     # TLS-ALPN-01 Challenge (RFC 8737)
@@ -1015,6 +1055,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         """
         raw = await request.body()
         account_id, _ = validate_acme_jws(raw, storage)
+        base = str(request.base_url).rstrip("/")
 
         auth = storage.get_authorization(auth_id)
         if not auth:
@@ -1031,12 +1072,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             )
 
         if tls01.get("status") != "pending":
-            return {
-                "type": "tls-alpn-01",
-                "url": tls01["url"],
-                "token": tls01["token"],
-                "status": tls01["status"],
-            }
+            base = str(request.base_url).rstrip("/")
+            nonce = uuid.uuid4().hex
+            storage.add_nonce(nonce)
+            return JSONResponse(
+                content={
+                    "type": "tls-alpn-01",
+                    "url": tls01["url"],
+                    "token": tls01["token"],
+                    "status": tls01["status"],
+                },
+                headers={
+                    "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                    "Replay-Nonce": nonce,
+                },
+            )
 
         account = storage.get_account(account_id)
         thumbprint = _compute_key_thumbprint(account["jwk"]) if account else ""
@@ -1050,12 +1100,20 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             _validate_tls_alpn01_async(auth_id, tls01, auth, storage, ra)
         )
 
-        return {
-            "type": "tls-alpn-01",
-            "url": tls01["url"],
-            "token": tls01["token"],
-            "status": "processing",
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={
+                "type": "tls-alpn-01",
+                "url": tls01["url"],
+                "token": tls01["token"],
+                "status": "processing",
+            },
+            headers={
+                "Link": f'<{base}/acme/authz/{auth_id}>; rel="up"',
+                "Replay-Nonce": nonce,
+            },
+        )
 
     # =========================================================================
     # Order finalization (RFC 8555 §7.4)

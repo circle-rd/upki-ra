@@ -590,7 +590,7 @@ class TestACMEEndpointBehavior(unittest.TestCase):
             nonce_resp = client.get("/acme/new-nonce")
             nonce = nonce_resp.headers["Replay-Nonce"]
             priv, jwk = self._make_ec_jwk()
-            from upki_ra.routes.acme_api import _base64url_encode, _compute_key_thumbprint
+            from upki_ra.routes.acme_api import _compute_key_thumbprint
 
             thumbprint = _compute_key_thumbprint(jwk)
             reg_body = self._sign_jws(
