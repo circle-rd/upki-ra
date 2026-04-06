@@ -270,7 +270,11 @@ def cmd_start(args: argparse.Namespace, ra: RegistrationAuthority) -> int:
         # contains the DNS names required for HTTPS hostname validation.
         sans_env: str = getattr(args, "env_sans", "") or ""
         args.sans = (
-            [{"type": "DNS", "value": name.strip()} for name in sans_env.split(",") if name.strip()]
+            [
+                {"type": "DNS", "value": name.strip()}
+                for name in sans_env.split(",")
+                if name.strip()
+            ]
             if sans_env
             else None
         )
