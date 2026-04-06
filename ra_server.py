@@ -132,7 +132,7 @@ def cmd_register(args, ra: RegistrationAuthority) -> int:
     try:
         ra.logger.info(f"Registering RA with CA: {cn}")
 
-        result = ra.register_with_ca(seed=seed, cn=cn)
+        result = ra.register_with_ca(seed=seed, cn=cn, sans=getattr(args, "sans", None))
 
         print("RA registered successfully!")
         print(f"  CN: {result.get('cn')}")
@@ -167,6 +167,7 @@ def cmd_listen(args, ra: RegistrationAuthority) -> int:
     host = args.host
     port = args.port
     debug = args.debug
+    tls_enabled: bool = getattr(args, "env_tls", False)
 
     # Check if registered
     if not ra.is_registered():
@@ -181,17 +182,22 @@ def cmd_listen(args, ra: RegistrationAuthority) -> int:
         # Create FastAPI app
         app = create_app(ra)
 
-        ra.logger.info(f"Starting RA server on {host}:{port}")
-        print(f"Starting uPKI RA Server on http://{host}:{port}")
+        scheme = "https" if tls_enabled else "http"
+        ra.logger.info(f"Starting RA server on {host}:{port} (TLS={tls_enabled})")
+        print(f"Starting uPKI RA Server on {scheme}://{host}:{port}")
         print("Press Ctrl+C to stop")
 
+        uvicorn_kwargs: dict = {
+            "host": host,
+            "port": port,
+            "log_level": "debug" if debug else "info",
+        }
+        if tls_enabled:
+            uvicorn_kwargs["ssl_certfile"] = os.path.join(ra.data_dir, "ra.crt")
+            uvicorn_kwargs["ssl_keyfile"] = os.path.join(ra.data_dir, "ra.key")
+
         # Run server using uvicorn
-        uvicorn.run(
-            app,
-            host=host,
-            port=port,
-            log_level="debug" if debug else "info",
-        )
+        uvicorn.run(app, **uvicorn_kwargs)
 
         return 0
 
@@ -233,6 +239,14 @@ def cmd_start(args: argparse.Namespace, ra: RegistrationAuthority) -> int:
             return 1
         args.seed = seed
         args.cn = getattr(args, "env_cn", "RA")
+        # Build SANs list from the UPKI_RA_SANS env var so the RA certificate
+        # contains the DNS names required for HTTPS hostname validation.
+        sans_env: str = getattr(args, "env_sans", "") or ""
+        args.sans = (
+            [{"type": "DNS", "value": name.strip()} for name in sans_env.split(",") if name.strip()]
+            if sans_env
+            else None
+        )
         ret = cmd_register(args, ra)
         if ret != 0:
             return ret
@@ -351,6 +365,11 @@ def main():
     # Seed and CN for auto-registration (used by the start command)
     args.env_seed = os.environ.get("UPKI_CA_SEED")
     args.env_cn = os.environ.get("UPKI_RA_CN", "RA")
+    # TLS: when true, uvicorn serves HTTPS using the RA's own certificate.
+    args.env_tls = os.environ.get("UPKI_RA_TLS", "false").lower() == "true"
+    # SANs: comma-separated DNS names to embed in the RA certificate.
+    # Required when UPKI_RA_TLS is true so Go 1.15+ can validate the hostname.
+    args.env_sans = os.environ.get("UPKI_RA_SANS", "")
     # ─────────────────────────────────────────────────────────────────────────
 
     # Create logger

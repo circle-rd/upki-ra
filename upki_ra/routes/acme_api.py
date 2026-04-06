@@ -537,7 +537,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # =========================================================================
 
     @router.get("/acme/directory")
-    async def get_acme_directory(request: Request) -> dict:
+    async def get_acme_directory(request: Request) -> dict:  # type: ignore[return]
         """Return the ACME directory object."""
         base = str(request.base_url).rstrip("/")
         return {
@@ -578,7 +578,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # =========================================================================
 
     @router.post("/acme/new-account", status_code=201)
-    async def create_acme_account(request: Request) -> dict:
+    async def create_acme_account(request: Request) -> JSONResponse:
         """Create or return an existing ACME account.
 
         The request body MUST be a flattened JWS with the account's public key
@@ -686,7 +686,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # =========================================================================
 
     @router.post("/acme/new-order", status_code=201)
-    async def create_acme_order(request: Request) -> dict:
+    async def create_acme_order(request: Request) -> JSONResponse:
         """Create a new certificate order.
 
         Clients authenticated via mTLS (X-SSL-CLIENT-VERIFY: SUCCESS) are
@@ -1002,7 +1002,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # =========================================================================
 
     @router.post("/acme/order/{order_id}/finalize")
-    async def finalize_order(order_id: str, request: Request) -> dict:
+    async def finalize_order(order_id: str, request: Request) -> JSONResponse:
         """Finalize an order by submitting a CSR.
 
         The order MUST be in the ready state. The server transitions through
@@ -1075,7 +1075,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                     certificate += "\n"
                 certificate += ca_pem
         except Exception as exc:
-            ra.logger.warning(f"ACME finalize: could not fetch CA cert for chain: {exc}")
+            ra.logger.warning(
+                f"ACME finalize: could not fetch CA cert for chain: {exc}"
+            )
 
         base = str(request.base_url).rstrip("/")
         cert_url = f"{base}/acme/cert/{order_id}"
@@ -1096,7 +1098,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # =========================================================================
 
     @router.get("/acme/cert/{cert_id}")
-    async def download_certificate(cert_id: str) -> dict:
+    async def download_certificate(cert_id: str) -> Response:
         """Return the issued certificate for a valid order."""
         order = storage.get_order(cert_id)
         if not order:
@@ -1106,7 +1108,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         pem_chain = order.get("certificate", "")
         if not pem_chain:
             raise HTTPException(status_code=404, detail="Certificate not found")
-        return Response(content=pem_chain, media_type="application/pem-certificate-chain")
+        return Response(
+            content=pem_chain, media_type="application/pem-certificate-chain"
+        )
 
     # =========================================================================
     # Revocation (RFC 8555 §7.6)
