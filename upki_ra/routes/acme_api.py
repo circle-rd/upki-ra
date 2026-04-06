@@ -1215,9 +1215,9 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # Certificate download (RFC 8555 §7.4.2)
     # =========================================================================
 
-    @router.get("/acme/cert/{cert_id}")
-    async def download_certificate(cert_id: str) -> Response:
-        """Return the issued certificate for a valid order."""
+    @router.api_route("/acme/cert/{cert_id}", methods=["GET", "POST"])
+    async def download_certificate(cert_id: str, request: Request) -> Response:
+        """Return the issued certificate for a valid order (POST-as-GET per RFC 8555 §7.4.2)."""
         order = storage.get_order(cert_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
