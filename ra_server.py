@@ -17,7 +17,7 @@ import os
 import sys
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from upki_ra.core import UPKIError, get_logger
