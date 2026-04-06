@@ -32,7 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from cryptography.x509 import load_der_x509_csr, load_pem_x509_certificate
 from cryptography.x509.oid import NameOID
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..registration_authority import RegistrationAuthority
 from ..storage import AbstractStorage, SQLiteStorage
@@ -546,7 +546,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             "newOrder": f"{base}/acme/new-order",
             "revokeCert": f"{base}/acme/revoke-cert",
             "keyChange": f"{base}/acme/key-change",
-            "meta": {"termsOfServiceAgreed": True},
+            "meta": {"termsOfService": "about:blank"},
         }
 
     # =========================================================================
@@ -637,11 +637,22 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         existing = storage.get_account_by_jwk(jwk)
         if existing:
-            return {
-                "status": "valid",
-                "contact": existing.get("contact", []),
-                "termsOfServiceAgreed": True,
-            }
+            existing_id = existing.get("id", _compute_key_thumbprint(jwk))
+            nonce = uuid.uuid4().hex
+            storage.add_nonce(nonce)
+            base = str(request.base_url).rstrip("/")
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "valid",
+                    "contact": existing.get("contact", []),
+                    "termsOfServiceAgreed": True,
+                },
+                headers={
+                    "Location": f"{base}/acme/account/{existing_id}",
+                    "Replay-Nonce": nonce,
+                },
+            )
 
         account_id = _compute_key_thumbprint(jwk)
         account: dict[str, Any] = {
@@ -654,11 +665,21 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         }
         storage.save_account(account_id, account)
 
-        return {
-            "status": "valid",
-            "contact": account["contact"],
-            "termsOfServiceAgreed": True,
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        base = str(request.base_url).rstrip("/")
+        return JSONResponse(
+            status_code=201,
+            content={
+                "status": "valid",
+                "contact": account["contact"],
+                "termsOfServiceAgreed": True,
+            },
+            headers={
+                "Location": f"{base}/acme/account/{account_id}",
+                "Replay-Nonce": nonce,
+            },
+        )
 
     # =========================================================================
     # Order (RFC 8555 §7.4)
@@ -764,14 +785,23 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         }
         storage.save_order(order_id, order)
 
-        return {
-            "status": order_status,
-            "identifiers": identifiers,
-            "authorizations": auth_urls,
-            "finalize": order["finalize"],
-            "notBefore": body.get("notBefore"),
-            "notAfter": body.get("notAfter"),
-        }
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            status_code=201,
+            content={
+                "status": order_status,
+                "identifiers": identifiers,
+                "authorizations": auth_urls,
+                "finalize": order["finalize"],
+                "notBefore": body.get("notBefore"),
+                "notAfter": body.get("notAfter"),
+            },
+            headers={
+                "Location": f"{base}/acme/order/{order_id}",
+                "Replay-Nonce": nonce,
+            },
+        )
 
     @router.get("/acme/order/{order_id}")
     async def get_order(order_id: str) -> dict:
@@ -1037,6 +1067,16 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                 detail=exc_str if profile_error else "Certificate issuance failed",
             ) from exc
 
+        # Append CA certificate to form a full chain (required by RFC 8555 §7.4.2).
+        try:
+            ca_pem = ra.get_ca_certificate()
+            if ca_pem:
+                if not certificate.endswith("\n"):
+                    certificate += "\n"
+                certificate += ca_pem
+        except Exception as exc:
+            ra.logger.warning(f"ACME finalize: could not fetch CA cert for chain: {exc}")
+
         base = str(request.base_url).rstrip("/")
         cert_url = f"{base}/acme/cert/{order_id}"
         order["status"] = "valid"
@@ -1044,7 +1084,12 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         order["certificate_url"] = cert_url
         storage.update_order(order_id, order)
 
-        return {"status": "valid", "certificate": cert_url}
+        nonce = uuid.uuid4().hex
+        storage.add_nonce(nonce)
+        return JSONResponse(
+            content={"status": "valid", "certificate": cert_url},
+            headers={"Replay-Nonce": nonce},
+        )
 
     # =========================================================================
     # Certificate download (RFC 8555 §7.4.2)
@@ -1058,10 +1103,10 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             raise HTTPException(status_code=404, detail="Order not found")
         if order.get("status") != "valid":
             raise HTTPException(status_code=400, detail="Certificate not yet available")
-        certificate = order.get("certificate", "")
-        if not certificate:
+        pem_chain = order.get("certificate", "")
+        if not pem_chain:
             raise HTTPException(status_code=404, detail="Certificate not found")
-        return {"certificate": certificate}
+        return Response(content=pem_chain, media_type="application/pem-certificate-chain")
 
     # =========================================================================
     # Revocation (RFC 8555 §7.6)
