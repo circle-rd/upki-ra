@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![PyPI](https://img.shields.io/pypi/v/upki-ra.svg)](https://pypi.org/project/upki-ra/)
 
 Registration Authority (RA) Server for the uPKI Public Key Infrastructure system. Provides a complete ACME v2 server implementation for automated certificate management.
 
