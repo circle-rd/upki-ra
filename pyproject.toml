@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "upki-ra"
-version = "0.1.0"
+version = "0.1.5"
 description = "uPKI Registration Authority Server"
 readme = "README.md"
 authors = ["uPKI Team <info@upki.example.com>"]
@@ -86,6 +86,10 @@ ignore_missing_imports = true
 [[mypy.overrides]]
 module = "zmq.*"
 ignore_missing_imports = true
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

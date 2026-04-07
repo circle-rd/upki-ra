@@ -1297,8 +1297,8 @@ typing-extensions = ">=4.12.0"
 
 [[package]]
 name = "upki-ca"
-version = "0.1.0"
-description = "uPKI CA instance"
+version = "0.1.5"
+description = "uPKI Certificate Authority server"
 optional = false
 python-versions = ">=3.11, <4.0"
 groups = ["dev"]
