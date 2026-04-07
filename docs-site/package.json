@@ -2,6 +2,7 @@
     "name": "upki-ra-docs",
     "version": "1.0.0",
     "private": true,
+    "description": "ACME v2 Registration Authority for private networks — RFC 8555 without Let's Encrypt.",
     "scripts": {
         "dev": "nuxt dev",
         "build": "nuxt build",
