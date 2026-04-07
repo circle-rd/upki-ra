@@ -233,7 +233,8 @@ poetry run ruff format .
 
 ## Related Projects
 
-- [uPKI CA Server](https://github.com/circle-rd/upki-ca) - Certificate Authority implementation
+- [uPKI CA Server](https://github.com/circle-rd/upki-ca) — Certificate Authority, ZMQ backend for this RA
+- [uPKI CLI](https://github.com/circle-rd/upki-cli) — Client application for certificate enrolment and renewal
 
 ## License
 
