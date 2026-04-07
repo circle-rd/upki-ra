@@ -1,122 +1,76 @@
 ---
 title: uPKI RA
 navigation: false
-layout: page
 ---
 
-## ::hero
+# ACME v2 for private networks.
 
-announcement:
-title: 'Traefik native integration'
-icon: '🚀'
-to: /docs/guides/traefik-integration
-actions:
-
-- name: Get Started
-  to: /docs/getting-started/introduction
-- name: GitHub
-  variant: ghost
-  to: https://github.com/circle-rd/upki-ra
-  leftIcon: 'lucide:github'
-
----
-
-#title
-ACME v2 for\nprivate networks.
-
-#description
 uPKI RA is a fully compliant **ACME v2 Registration Authority** (RFC 8555) that connects your internal infrastructure to a self-hosted CA. Use Traefik, cert-manager, or any ACME client — no Let's Encrypt required.
-::
 
-::card-grid
-#title
-Why uPKI RA?
+[Get Started](/docs/getting-started/introduction) · [GitHub](https://github.com/circle-rd/upki-ra)
 
-#root
-:ellipsis
+## Why uPKI RA?
 
-#default
-::card
+:::card-group
 
----
+## ::card
 
-icon: lucide:shield-check
+title: RFC 8555 compliant
+icon: i-lucide-shield-check
 
 ---
 
-#title
-RFC 8555 compliant
-#description
 Full ACME v2 implementation — new-account, new-order, challenges, certificate issuance and revocation.
 ::
 
-::card
+## ::card
+
+title: Auto-bootstrap
+icon: i-lucide-rocket
 
 ---
 
-icon: lucide:rocket
-
----
-
-#title
-Auto-bootstrap
-#description
 First `start` automatically registers the RA with the CA and issues its own mTLS certificate.
 ::
 
-::card
+## ::card
+
+title: mTLS by default
+icon: i-lucide-lock
 
 ---
 
-icon: lucide:lock
-
----
-
-#title
-mTLS by default
-#description
 Mutual TLS protects all admin and client endpoints. Docker image ships with TLS enabled by default.
 ::
 
-::card
+## ::card
+
+title: Traefik native
+icon: i-lucide-layers
 
 ---
 
-icon: lucide:layers
-
----
-
-#title
-Traefik native
-#description
 Works out of the box as a Traefik ACME provider. Point `caServer` at the RA and you're done.
 ::
 
-::card
+## ::card
+
+title: Air-gapped friendly
+icon: i-lucide-wifi-off
 
 ---
 
-icon: lucide:wifi-off
-
----
-
-#title
-Air-gapped friendly
-#description
 Zero internet dependency. Deploy behind a firewall, in a DMZ, or in a fully isolated network.
 ::
 
-::card
+## ::card
+
+title: SQLite state
+icon: i-lucide-database
 
 ---
 
-icon: lucide:database
-
----
-
-#title
-SQLite state
-#description
 ACME state (accounts, orders, authorizations) stored in SQLite. Simple, reliable, zero operational overhead.
 ::
-::
+
+:::
