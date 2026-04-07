@@ -60,11 +60,13 @@ graph TB
 
 ## Key Features
 
-- **ACME v2 Server** - Complete implementation supporting HTTP-01 and DNS-01 challenge validation
-- **Multi-Protocol Support** - ACME, REST API, and mTLS authentication
-- **Certificate Lifecycle Management** - Enrollment, renewal, and revocation
-- **Kubernetes Integration** - Works with cert-manager as ACME issuer
-- **Traefik Integration** - Native ACME support for Traefik reverse proxy
+- **ACME v2 Server** — Complete RFC 8555 implementation supporting HTTP-01 and DNS-01 challenge validation
+- **Multi-Protocol Support** — ACME, REST API, and mTLS authentication
+- **Certificate Lifecycle Management** — Enrollment, renewal, and revocation
+- **Auto-bootstrap** — The `start` command registers the RA with the CA on first boot and starts the server automatically, with no manual intervention
+- **TLS by default (Docker)** — The RA serves HTTPS using its own RA certificate, as required by Traefik's built-in ACME client (LEGO)
+- **Kubernetes Integration** — Works with cert-manager as a custom ACME issuer
+- **Traefik Integration** — Direct ACME integration for private networks where Let's Encrypt is not accessible
 
 ## Requirements
 
@@ -105,9 +107,39 @@ poetry run python ra_server.py register -s <registration_seed>
 # Default: http://127.0.0.1:8000
 poetry run python ra_server.py listen
 
-# Custom configuration
+# Custom bind address and port
 poetry run python ra_server.py listen --web-ip 0.0.0.0 --web-port 8443
 ```
+
+### Alternative: Docker Auto-bootstrap
+
+The `start` command automates the full lifecycle: it runs `register` on the first boot (when no `ra.crt` is present on the data volume), then calls `listen`. This is the default Docker entrypoint.
+
+```bash
+# All configuration via environment variables
+UPKI_DATA_DIR=/data \
+UPKI_CA_HOST=upki-ca \
+UPKI_CA_SEED=<seed> \
+  poetry run python ra_server.py start
+```
+
+## Environment Variables
+
+All CLI flags can be overridden by environment variables, which is the recommended approach for Docker and systemd deployments. CLI flags always take precedence over environment variables.
+
+| Variable        | Default                  | Description                                                                   |
+| --------------- | ------------------------ | ----------------------------------------------------------------------------- |
+| `UPKI_DATA_DIR` | `~/.upki/ra`             | Data directory (certs, config, ACME database)                                 |
+| `UPKI_CA_HOST`  | `127.0.0.1`              | CA server hostname or IP (`-i` flag)                                          |
+| `UPKI_CA_PORT`  | `5000`                   | CA server ZMQ port (`-p` flag)                                                |
+| `UPKI_CA_SEED`  | —                        | Registration seed — required for `start` on first boot                        |
+| `UPKI_RA_HOST`  | `127.0.0.1`              | Web server bind address (`--web-ip` flag)                                     |
+| `UPKI_RA_PORT`  | `8000`                   | Web server port (`--web-port` flag)                                           |
+| `UPKI_RA_TLS`   | `true` (Docker image)    | Serve HTTPS using the RA certificate                                          |
+| `UPKI_RA_SANS`  | `upki-ra` (Docker image) | Comma-separated DNS SANs embedded in the RA certificate at first registration |
+| `UPKI_RA_CN`    | `RA`                     | Common Name embedded in the RA certificate                                    |
+
+> **Note on `UPKI_RA_TLS` and `UPKI_RA_SANS`**: these are set as `ENV` defaults in the Docker image (values `true` and `upki-ra`). For local/bare-metal deployments both default to their unset values (`false` / empty). `UPKI_RA_SANS` is only used at first registration — changing it after the RA certificate has been issued has no effect.
 
 ## ACME Server Setup
 
@@ -129,9 +161,27 @@ spec:
           ingressClassName: traefik
 ```
 
-### With Traefik
+### With Traefik (private / air-gapped networks)
 
-Configure Traefik to use uPKI as the ACME server. See [Traefik Integration](docs/TRAEFIK_INTEGRATION.md) for detailed configuration.
+uPKI is designed as a drop-in replacement for Let's Encrypt in environments where internet access is unavailable. Traefik's built-in ACME client (LEGO) connects directly to the RA as a custom CA server.
+
+Two prerequisites must be met before Traefik can obtain certificates:
+
+1. **The RA must serve HTTPS** — `UPKI_RA_TLS=true` (the default in the Docker image). LEGO requires TLS on the ACME endpoint.
+2. **Traefik must trust the internal CA certificate** — the RA certificate is signed by the uPKI CA; Traefik's Alpine-based image must have `ca.crt` injected into its trust store before starting.
+
+```yaml
+# traefik.yml (static configuration)
+certificatesResolvers:
+  upki:
+    acme:
+      caServer: https://upki-ra:8000/acme/directory
+      storage: /acme/acme.json
+      httpChallenge:
+        entryPoint: web
+```
+
+See [Traefik Integration](docs/TRAEFIK_INTEGRATION.md) for the full Docker Compose setup, CA certificate injection, DNS resolver configuration, and troubleshooting.
 
 ## API Endpoints
 
@@ -215,6 +265,89 @@ graph LR
     RA --> Keys
     RA --> CA_Cert
 ```
+
+## Docker Deployment
+
+### Minimal Docker Compose
+
+The example below shows the minimal configuration needed to deploy the uPKI stack with Traefik. `UPKI_RA_TLS` and `UPKI_RA_SANS` are already set as defaults in the Docker image and do not need to be redeclared unless you want to override them.
+
+```yaml
+services:
+  upki-ca:
+    image: ghcr.io/circle-rd/upki-ca:latest
+    restart: unless-stopped
+    environment:
+      UPKI_DATA_DIR: /data
+      UPKI_CA_SEED: ${PKI_SEED}
+    volumes:
+      - upki-ca-data:/data
+    networks:
+      - demo-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'python -c ''import socket; s=socket.socket(); s.settimeout(2); s.connect(("127.0.0.1", 5000)); s.close()''',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  upki-ra:
+    image: ghcr.io/circle-rd/upki-ra:latest
+    restart: unless-stopped
+    depends_on:
+      upki-ca:
+        condition: service_healthy
+    environment:
+      UPKI_DATA_DIR: /data
+      UPKI_CA_HOST: upki-ca
+      UPKI_CA_SEED: ${PKI_SEED}
+      UPKI_RA_HOST: 0.0.0.0
+      # UPKI_RA_TLS=true and UPKI_RA_SANS=upki-ra are already set in the image
+    volumes:
+      - upki-ra-data:/data
+    networks:
+      - demo-net
+
+  traefik:
+    image: traefik:v3
+    restart: unless-stopped
+    depends_on:
+      upki-ra:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cp /ra-data/ca.crt /usr/local/share/ca-certificates/upki-ca.crt
+        update-ca-certificates
+        exec traefik
+    environment:
+      TRAEFIK_CERTIFICATESRESOLVERS_UPKI_ACME_EMAIL: ${ADMIN_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - acme:/acme
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - upki-ra-data:/ra-data:ro # Read CA cert from RA data volume
+    networks:
+      - demo-net
+
+volumes:
+  upki-ca-data:
+  upki-ra-data:
+  acme:
+
+networks:
+  demo-net:
+```
+
+See [Traefik Integration](docs/TRAEFIK_INTEGRATION.md) for the full configuration reference including DNS resolver setup and Traefik service labels.
 
 ## Development
 
