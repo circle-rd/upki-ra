@@ -1,5 +1,4 @@
 ---
-navigation: false
 seo:
   title: uPKI RA — ACME v2 Registration Authority
   description: ACME v2 Registration Authority for private networks — RFC 8555 without Let's Encrypt.
