@@ -1,5 +1,8 @@
 export default defineNuxtConfig({
   extends: ["docus"],
+  app: {
+    baseURL: process.env.NUXT_APP_BASE_URL ?? "/upki-ra/",
+  },
   site: {
     url: process.env.NUXT_SITE_URL ?? "https://docs.circle-cyber.com/upki-ra",
   },
