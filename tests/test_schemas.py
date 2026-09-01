@@ -305,14 +305,16 @@ class TestStatsSchema(unittest.TestCase):
     """Test cases for the `CertificateStats` acronym alias override."""
 
     def test_pending_csrs_alias(self):
-        stats = CertificateStats(total=10, active=8, expiring_soon=1, revoked=1, pending_csrs=2)
+        stats = CertificateStats(
+            total=10, active=8, expiring_soon=1, expired=0, revoked=1, pending_csrs=2
+        )
         payload = stats.model_dump(by_alias=True)
         self.assertEqual(payload["pendingCSRs"], 2)
         self.assertNotIn("pendingCsrs", payload)
 
     def test_populate_by_name_still_works_from_camel_json(self):
         stats = CertificateStats.model_validate(
-            {"total": 1, "active": 1, "expiringSoon": 0, "revoked": 0, "pendingCSRs": 0}
+            {"total": 1, "active": 1, "expiringSoon": 0, "expired": 0, "revoked": 0, "pendingCSRs": 0}
         )
         self.assertEqual(stats.pending_csrs, 0)
 

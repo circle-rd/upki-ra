@@ -259,6 +259,38 @@ class TestInventoryStorageCertificates(unittest.TestCase):
         row = self.storage.get_certificate_by_common_name("x.example.com", status="revoked")
         self.assertEqual(row["serial"], "s2")
 
+    def test_get_certificate_recomputes_stale_expired_status(self):
+        """Regression test: `status` is only ever written once at issuance/
+        revocation time and never revisited, so a certificate that simply
+        passed its `valid_to` date must still be reported "expired" on read,
+        not the stale "valid" the row was originally stored with."""
+        self.storage.upsert_certificate(
+            self._cert(serial="stale", status="valid", valid_to="2020-01-01T00:00:00Z")
+        )
+        cert = self.storage.get_certificate("stale")
+        self.assertEqual(cert["status"], "expired")
+
+    def test_get_certificate_does_not_override_real_revoked_status(self):
+        self.storage.upsert_certificate(
+            self._cert(serial="revoked-1", status="revoked", valid_to="2099-01-01T00:00:00Z")
+        )
+        cert = self.storage.get_certificate("revoked-1")
+        self.assertEqual(cert["status"], "revoked")
+
+    def test_list_certificates_filter_by_status_uses_live_computed_status(self):
+        """A certificate stored with the stale "valid" status but whose
+        `valid_to` has already passed must be found by `?status=expired`,
+        not by `?status=valid`."""
+        self.storage.upsert_certificate(
+            self._cert(serial="stale", status="valid", valid_to="2020-01-01T00:00:00Z")
+        )
+        items, total = self.storage.list_certificates(status="expired")
+        self.assertEqual(total, 1)
+        self.assertEqual(items[0]["serial"], "stale")
+
+        items, total = self.storage.list_certificates(status="valid")
+        self.assertEqual(total, 0)
+
 
 class TestInventoryStorageStatistics(unittest.TestCase):
     """Test cases for aggregate statistics."""
@@ -295,13 +327,27 @@ class TestInventoryStorageStatistics(unittest.TestCase):
                 "valid_to": "2030-01-01T00:00:00Z",
             }
         )
+        # Stale-status regression: stored as "valid" at issuance time but
+        # never revisited since - must count as expired, not active.
+        self.storage.upsert_certificate(
+            {
+                "serial": "s3",
+                "dn": "CN=c",
+                "common_name": "c",
+                "key_type": "RSA-2048",
+                "status": "valid",
+                "valid_from": "2020-01-01T00:00:00Z",
+                "valid_to": "2020-06-01T00:00:00Z",
+            }
+        )
         self.storage.create_csr(
             {"subject": "pending.example.com", "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----"}
         )
 
         counts = self.storage.get_certificate_counts()
-        self.assertEqual(counts["total"], 2)
+        self.assertEqual(counts["total"], 3)
         self.assertEqual(counts["active"], 1)
+        self.assertEqual(counts["expired"], 1)
         self.assertEqual(counts["revoked"], 1)
         self.assertEqual(counts["pendingCSRs"], 1)
 
