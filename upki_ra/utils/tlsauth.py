@@ -387,7 +387,10 @@ class CertificateValidator:
             # Default reason is acceptable
             return True, ""
 
-        if reason.lower() not in CertificateValidator.REVOCATION_REASONS:
+        # REVOCATION_REASONS uses RFC 5280's mixed-case spelling (e.g.
+        # "keyCompromise"); comparing against `reason.lower()` directly would
+        # never match any of them except "unspecified" - lowercase both sides.
+        if reason.lower() not in (r.lower() for r in CertificateValidator.REVOCATION_REASONS):
             return False, f"Invalid revocation reason: {reason}"
 
         return True, ""

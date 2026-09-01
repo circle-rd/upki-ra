@@ -139,6 +139,7 @@ All CLI flags can be overridden by environment variables, which is the recommend
 | `UPKI_RA_TLS`   | `true` (Docker image)    | Serve HTTPS using the RA certificate                                          |
 | `UPKI_RA_SANS`  | `upki-ra` (Docker image) | Comma-separated DNS SANs embedded in the RA certificate at first registration |
 | `UPKI_RA_CN`    | `RA`                     | Common Name embedded in the RA certificate                                    |
+| `UPKI_RA_CORS_ORIGINS` | `*`               | Comma-separated list of allowed CORS origins for the `/api/v1/inventory/*` web frontend API (e.g. `https://app.example.com,http://localhost:5173`) |
 
 > **Note on `UPKI_RA_TLS` and `UPKI_RA_SANS`**: these are set as `ENV` defaults in the Docker image (values `true` and `upki-ra`). For local/bare-metal deployments both default to their unset values (`false` / empty). `UPKI_RA_SANS` is only used at first registration — changing it after the RA certificate has been issued has no effect.
 

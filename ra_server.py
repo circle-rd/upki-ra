@@ -18,6 +18,7 @@ import sys
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from upki_ra.core import UPKIError, get_logger
@@ -25,8 +26,10 @@ from upki_ra.registration_authority import RegistrationAuthority
 from upki_ra.routes import (
     create_acme_routes,
     create_client_routes,
+    create_inventory_routes,
     create_private_routes,
     create_public_routes,
+    create_ws_routes,
 )
 
 
@@ -45,11 +48,34 @@ def create_app(ra: RegistrationAuthority) -> FastAPI:
         version="1.0.0",
     )
 
+    # CORS: the web frontend (uPKI-app) is served from a different origin
+    # than this API (different port in dev, different container/domain in
+    # production), so browsers block the /api/v1/inventory/* calls without
+    # this. Configurable via UPKI_RA_CORS_ORIGINS (comma-separated list,
+    # default "*" - the inventory API is unauthenticated/demo-mode today
+    # anyway, see routes/inventory_api.py's module docstring, so a wildcard
+    # doesn't widen the actual attack surface; credentials are never sent).
+    cors_origins = os.environ.get("UPKI_RA_CORS_ORIGINS", "*")
+    origins = (
+        ["*"]
+        if cors_origins == "*"
+        else [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # Register API routers
     app.include_router(create_acme_routes(ra), prefix="")
     app.include_router(create_public_routes(ra), prefix="/api/v1")
     app.include_router(create_private_routes(ra), prefix="/api/v1/private")
     app.include_router(create_client_routes(ra), prefix="/api/v1/client")
+    app.include_router(create_inventory_routes(ra), prefix="/api/v1/inventory")
+    app.include_router(create_ws_routes(ra), prefix="/api/v1/inventory")
 
     # Error handlers
     @app.exception_handler(UPKIError)

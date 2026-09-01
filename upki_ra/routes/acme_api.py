@@ -1185,6 +1185,13 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
                 detail=exc_str if profile_error else "Certificate issuance failed",
             ) from exc
 
+        try:
+            ra.inventory_sync.record_issuance(
+                certificate, actor=account_id, source="ACME", profile_id=order_profile
+            )
+        except Exception:
+            ra.logger.exception("ACME finalize: failed to index issued certificate")
+
         # Append CA certificate to form a full chain (required by RFC 8555 §7.4.2).
         try:
             ca_pem = ra.get_ca_certificate()
@@ -1215,9 +1222,18 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
     # Certificate download (RFC 8555 §7.4.2)
     # =========================================================================
 
-    @router.api_route("/acme/cert/{cert_id}", methods=["GET", "POST"])
+    @router.get("/acme/cert/{cert_id}", operation_id="downloadCertificate")
+    @router.post("/acme/cert/{cert_id}", operation_id="downloadCertificateViaPost")
     async def download_certificate(cert_id: str, request: Request) -> Response:
-        """Return the issued certificate for a valid order (POST-as-GET per RFC 8555 §7.4.2)."""
+        """Return the issued certificate for a valid order (POST-as-GET per RFC 8555 §7.4.2).
+
+        Registered separately for GET and POST (rather than a single
+        ``api_route(methods=["GET", "POST"])``) with distinct explicit
+        ``operation_id``s: FastAPI's auto-generated operation_id doesn't
+        disambiguate by method for a single multi-method route, which
+        produced a duplicate-operation-ID warning and would confuse
+        OpenAPI-based client codegen.
+        """
         order = storage.get_order(cert_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -1312,6 +1328,13 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         except Exception as exc:
             ra.logger.error(f"ACME revoke failed for {dn}: {exc}")
             raise HTTPException(status_code=500, detail="Revocation failed") from exc
+
+        try:
+            ra.inventory_sync.record_revocation(
+                cn, str(body.get("reason", 0)), actor=account_id, source="ACME"
+            )
+        except Exception:
+            ra.logger.exception("ACME revoke: failed to index certificate revocation")
 
         return {"status": "revoked"}
 
