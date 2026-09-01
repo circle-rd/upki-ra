@@ -271,6 +271,25 @@ dXNl
 
         self.assertFalse(is_valid)
 
+    def test_validate_revocation_reason_accepts_every_rfc5280_reason(self):
+        """Regression test: every entry in REVOCATION_REASONS must itself validate.
+
+        REVOCATION_REASONS uses RFC 5280's mixed-case spelling (e.g.
+        "keyCompromise"), previously compared against `reason.lower()`
+        directly - which never matched any entry except "unspecified".
+        """
+        for reason in CertificateValidator.REVOCATION_REASONS:
+            is_valid, error = CertificateValidator.validate_revocation_reason(reason)
+            self.assertTrue(is_valid, f"{reason!r} should be a valid revocation reason: {error}")
+
+    def test_validate_revocation_reason_is_case_insensitive(self):
+        """Reason matching should be case-insensitive either way."""
+        is_valid, _ = CertificateValidator.validate_revocation_reason("keycompromise")
+        self.assertTrue(is_valid)
+
+        is_valid, _ = CertificateValidator.validate_revocation_reason("KEYCOMPROMISE")
+        self.assertTrue(is_valid)
+
 
 if __name__ == "__main__":
     unittest.main()

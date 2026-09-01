@@ -16,6 +16,11 @@ from .core.upki_error import (
     ValidationError,
 )
 from .core.upki_logger import UPKILogger
+from .schemas import Certificate
+from .services.inventory_sync import InventorySyncService
+from .services.websocket_manager import ConnectionManager
+from .storage.inventory_storage import InventoryStorage
+from .utils.cert_metadata import extract_cn_from_dn
 from .utils.common import (
     ensure_directory,
     read_json_file,
@@ -82,6 +87,16 @@ class RegistrationAuthority:
         # Initialize TLS authentication
         self._tls_auth: TLSAuth | None = None
 
+        # Initialize the certificate/CA/profile inventory index (see
+        # upki_ra/storage/inventory_storage.py) and the service that keeps
+        # it in sync with every issuance/revocation/renewal.
+        self._inventory: InventoryStorage | None = None
+        self._inventory_sync: InventorySyncService | None = None
+
+        # WebSocket broadcaster for live frontend updates (best-effort, see
+        # services/websocket_manager.py).
+        self._ws_manager: ConnectionManager | None = None
+
         # Configuration
         self._config: dict[str, Any] = {}
         self._load_config()
@@ -104,7 +119,9 @@ class RegistrationAuthority:
     def reg_client(self) -> RegistrationClient:
         """Get or create registration client instance."""
         if self._reg_client is None:
-            self._reg_client = RegistrationClient(host=self.ca_host, logger=self.logger)
+            self._reg_client = RegistrationClient(
+                host=self.ca_host, port=self.ca_port + 1, logger=self.logger
+            )
         return self._reg_client
 
     @property
@@ -115,6 +132,28 @@ class RegistrationAuthority:
             self._tls_auth = TLSAuth(ca_cert=ca_cert, logger=self.logger)
             self._tls_auth.admin_dns = self._admin_dns
         return self._tls_auth
+
+    @property
+    def inventory(self) -> InventoryStorage:
+        """Get or create the certificate/CA/profile inventory storage."""
+        if self._inventory is None:
+            self._inventory = InventoryStorage(self.data_dir)
+            self._inventory.initialize()
+        return self._inventory
+
+    @property
+    def inventory_sync(self) -> InventorySyncService:
+        """Get or create the service that keeps the inventory index in sync."""
+        if self._inventory_sync is None:
+            self._inventory_sync = InventorySyncService(self.inventory)
+        return self._inventory_sync
+
+    @property
+    def ws_manager(self) -> ConnectionManager:
+        """Get or create the WebSocket connection manager."""
+        if self._ws_manager is None:
+            self._ws_manager = ConnectionManager()
+        return self._ws_manager
 
     @property
     def seed(self) -> str:
@@ -266,7 +305,65 @@ class RegistrationAuthority:
     # Certificate Operations
     # -------------------------------------------------------------------------
 
-    def certify(self, csr: str, profile: str = "server") -> dict[str, Any]:
+    def _index_issuance(
+        self, cert_pem: str | None, *, actor: str, source: str, profile_id: str | None, action: str
+    ) -> None:
+        """Best-effort: record an issuance/renewal in the inventory index.
+
+        Never raises - the inventory index is a local read cache, not the
+        source of truth (the CA vault is), so a parsing/indexing failure
+        must never affect the outcome of the actual PKI operation. Also
+        broadcasts the corresponding `certificate.issued`/`certificate.renewed`
+        WebSocket event (best-effort, see services/websocket_manager.py).
+        """
+        if not cert_pem:
+            return
+        try:
+            cert = self.inventory_sync.record_issuance(
+                cert_pem, actor=actor, source=source, profile_id=profile_id, action=action
+            )
+            event = "certificate.renewed" if action == "renewed" else "certificate.issued"
+            self.ws_manager.broadcast_nowait(event, cert.model_dump(by_alias=True, mode="json"))
+        except Exception:
+            self.logger.exception("Failed to index issued certificate")
+
+    def _index_revocation(self, dn: str, reason: str, *, actor: str, source: str) -> None:
+        """Best-effort: record a revocation in the inventory index. Never raises."""
+        common_name = extract_cn_from_dn(dn)
+        if not common_name:
+            return
+        try:
+            updated = self.inventory_sync.record_revocation(
+                common_name, reason, actor=actor, source=source
+            )
+            if updated:
+                row = self.inventory.get_certificate_by_common_name(common_name, status="revoked")
+                if row:
+                    cert = Certificate.from_storage_row(row)
+                    self.ws_manager.broadcast_nowait(
+                        "certificate.revoked", cert.model_dump(by_alias=True, mode="json")
+                    )
+        except Exception:
+            self.logger.exception("Failed to index certificate revocation")
+
+    def _index_unrevocation(self, dn: str, *, actor: str, source: str) -> None:
+        """Best-effort: record an unrevocation in the inventory index. Never raises."""
+        common_name = extract_cn_from_dn(dn)
+        if not common_name:
+            return
+        try:
+            self.inventory_sync.record_unrevocation(common_name, actor=actor, source=source)
+        except Exception:
+            self.logger.exception("Failed to index certificate unrevocation")
+
+    def certify(
+        self,
+        csr: str,
+        profile: str = "server",
+        *,
+        actor: str = "anonymous",
+        source: str = "SCEP",
+    ) -> dict[str, Any]:
         """Sign a certificate request (certify).
 
         This is the main certificate enrollment endpoint. The CSR is validated
@@ -275,6 +372,8 @@ class RegistrationAuthority:
         Args:
             csr: CSR in PEM format.
             profile: Certificate profile to use.
+            actor: Who/what triggered the request, for the activity log.
+            source: Origin of the request, for the activity log.
 
         Returns:
             Dictionary containing certificate, DN, and serial number.
@@ -299,6 +398,13 @@ class RegistrationAuthority:
             response = self.zmq_client.sign_csr(csr=csr, profile=profile)
 
             self.logger.info(f"Certificate signed successfully: {response.get('dn')}")
+            self._index_issuance(
+                response.get("certificate"),
+                actor=actor,
+                source=source,
+                profile_id=profile,
+                action="created",
+            )
             return response
 
         except CAConnectionError:
@@ -307,11 +413,13 @@ class RegistrationAuthority:
             self.logger.error(f"Certification failed: {e}")
             raise CertificateError(f"Failed to sign certificate: {e}") from e
 
-    def renew(self, dn: str) -> dict[str, Any]:
+    def renew(self, dn: str, *, actor: str = "system", source: str = "API") -> dict[str, Any]:
         """Renew a certificate.
 
         Args:
             dn: Distinguished Name of certificate to renew.
+            actor: Who/what triggered the request, for the activity log.
+            source: Origin of the request, for the activity log.
 
         Returns:
             Dictionary containing new certificate and serial number.
@@ -330,6 +438,13 @@ class RegistrationAuthority:
             response = self.zmq_client.renew_certificate(dn=dn)
 
             self.logger.info("Certificate renewed successfully")
+            self._index_issuance(
+                response.get("certificate"),
+                actor=actor,
+                source=source,
+                profile_id=None,
+                action="renewed",
+            )
             return response
 
         except CAConnectionError:
@@ -338,12 +453,16 @@ class RegistrationAuthority:
             self.logger.error(f"Renewal failed: {e}")
             raise CertificateError(f"Failed to renew certificate: {e}") from e
 
-    def revoke(self, dn: str, reason: str = "unspecified") -> bool:
+    def revoke(
+        self, dn: str, reason: str = "unspecified", *, actor: str = "system", source: str = "API"
+    ) -> bool:
         """Revoke a certificate.
 
         Args:
             dn: Distinguished Name of certificate to revoke.
             reason: Revocation reason.
+            actor: Who/what triggered the request, for the activity log.
+            source: Origin of the request, for the activity log.
 
         Returns:
             True if revocation successful.
@@ -367,6 +486,8 @@ class RegistrationAuthority:
             result = self.zmq_client.revoke_certificate(dn=dn, reason=reason)
 
             self.logger.info("Certificate revoked successfully")
+            if result:
+                self._index_revocation(dn, reason, actor=actor, source=source)
             return result
 
         except CAConnectionError:
@@ -375,11 +496,13 @@ class RegistrationAuthority:
             self.logger.error(f"Revocation failed: {e}")
             raise RevocationError(f"Failed to revoke certificate: {e}") from e
 
-    def unrevoke(self, dn: str) -> bool:
+    def unrevoke(self, dn: str, *, actor: str = "system", source: str = "API") -> bool:
         """Unrevoke a certificate.
 
         Args:
             dn: Distinguished Name of certificate to unrevoke.
+            actor: Who/what triggered the request, for the activity log.
+            source: Origin of the request, for the activity log.
 
         Returns:
             True if unrevocation successful.
@@ -398,6 +521,8 @@ class RegistrationAuthority:
             result = self.zmq_client.unrevoke_certificate(dn=dn)
 
             self.logger.info("Certificate unrevoked successfully")
+            if result:
+                self._index_unrevocation(dn, actor=actor, source=source)
             return result
 
         except CAConnectionError:

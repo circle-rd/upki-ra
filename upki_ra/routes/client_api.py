@@ -109,7 +109,7 @@ def create_client_routes(ra: RegistrationAuthority) -> APIRouter:
             ra.logger.info(f"Processing certificate renewal for: {dn}")
 
             # Renew certificate
-            result = ra.renew(dn=dn)
+            result = ra.renew(dn=dn, actor=dn, source="API")
 
             return format_response(
                 status="success",
@@ -182,7 +182,7 @@ def create_client_routes(ra: RegistrationAuthority) -> APIRouter:
             ra.logger.info(f"Processing certificate revocation for: {dn}")
 
             # Revoke certificate
-            result = ra.revoke(dn=dn, reason=reason)
+            result = ra.revoke(dn=dn, reason=reason, actor=dn, source="API")
 
             if result:
                 return format_response(

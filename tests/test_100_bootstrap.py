@@ -7,7 +7,8 @@ end-to-end auto-bootstrap behaviour:
 2. RA restart (certs already present) skips registration.
 3. RA exits with a non-zero code when not registered and no seed is given.
 
-The upki-ca package (path dev dependency) must be installed for these tests.
+A sibling upki-ca checkout (any casing, e.g. upki-ca or uPKI-ca) must exist next to this
+repo for these tests; they run real ca_server.py/ra_server.py subprocesses.
 
 Author: uPKI Team
 License: MIT
@@ -25,11 +26,17 @@ from collections.abc import Generator
 import pytest
 import yaml
 
-# Paths to the two CLI entry points
-CA_SERVER_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-    "upki-ca",
-    "ca_server.py",
+# Paths to the two CLI entry points. Sibling repo directory casing varies
+# across checkouts (upki-ca vs uPKI-ca), so probe all known variants.
+_REPOS_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+_CA_DIR_CANDIDATES = ["upki-ca", "uPKI-ca", "upki_ca"]
+CA_SERVER_PATH = next(
+    (
+        candidate
+        for name in _CA_DIR_CANDIDATES
+        if os.path.isfile(candidate := os.path.join(_REPOS_ROOT, name, "ca_server.py"))
+    ),
+    os.path.join(_REPOS_ROOT, _CA_DIR_CANDIDATES[0], "ca_server.py"),
 )
 
 _CA_AVAILABLE = os.path.isfile(CA_SERVER_PATH)

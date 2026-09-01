@@ -143,6 +143,17 @@ def create_private_routes(ra: RegistrationAuthority) -> APIRouter:
                 seed=ra.seed, cn=cn, profile=profile, sans=sans
             )
 
+            try:
+                if result.get("certificate"):
+                    ra.inventory_sync.record_issuance(
+                        result["certificate"],
+                        actor=_auth.get("subject", "admin"),
+                        source="API",
+                        profile_id=profile,
+                    )
+            except Exception:
+                ra.logger.exception("Failed to index registered node certificate")
+
             return format_response(status="success", data={"node": result})
 
         except ValidationError as e:
@@ -375,6 +386,7 @@ def create_private_routes(ra: RegistrationAuthority) -> APIRouter:
         try:
             crl = ra.generate_crl()
 
+            await ra.ws_manager.broadcast("crl.updated", {})
             return format_response(status="success", data={"crl": crl})
 
         except CAConnectionError as e:

@@ -666,6 +666,37 @@ class TestACMEEndpointBehavior(unittest.TestCase):
 
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_download_cert_via_post_as_get(self):
+        """POST /acme/cert/{id} (RFC 8555 §7.4.2 "POST-as-GET") must behave like GET."""
+        client, mock_ra, tmp = self._make_app_with_storage()
+        try:
+            from upki_ra.storage import SQLiteStorage
+
+            storage = SQLiteStorage(tmp)
+            storage.initialize()
+            storage.save_account("acct-post", {"id": "acct-post", "status": "valid"})
+            storage.save_order(
+                "postorder",
+                {
+                    "id": "postorder",
+                    "account_id": "acct-post",
+                    "status": "valid",
+                    "certificate": (
+                        "-----BEGIN CERTIFICATE-----\nDATA\n-----END CERTIFICATE-----\n"
+                    ),
+                    "certificate_url": "http://testserver/acme/cert/postorder",
+                },
+            )
+            resp = client.post("/acme/cert/postorder")
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn(
+                "application/pem-certificate-chain", resp.headers.get("content-type", "")
+            )
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_download_cert_includes_full_chain(self):
         """GET /acme/cert/{id} body must contain both end-entity and CA certificates."""
         client, mock_ra, tmp = self._make_app_with_storage()
