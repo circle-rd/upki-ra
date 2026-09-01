@@ -440,16 +440,17 @@ class ZMQClient:
 class RegistrationClient(ZMQClient):
     """ZMQ client for RA registration with CA server.
 
-    This class extends ZMQClient to use the registration endpoint (port 5001)
+    This class extends ZMQClient to use the registration endpoint (CA port + 1)
     for initial RA registration.
     """
 
-    # Registration endpoint uses port 5001
+    # Registration endpoint uses CA port + 1 by default
     DEFAULT_PORT = 5001
 
     def __init__(
         self,
         host: str = ZMQClient.DEFAULT_HOST,
+        port: int = DEFAULT_PORT,
         timeout: int = ZMQClient.DEFAULT_TIMEOUT,
         logger: UPKILogger | None = None,
     ) -> None:
@@ -457,11 +458,12 @@ class RegistrationClient(ZMQClient):
 
         Args:
             host: CA server hostname or IP address.
+            port: CA registration port (default: 5001, i.e. CA port + 1).
             timeout: Request timeout in milliseconds.
             logger: Optional logger instance.
         """
         super().__init__(
-            host=host, port=self.DEFAULT_PORT, timeout=timeout, logger=logger
+            host=host, port=port, timeout=timeout, logger=logger
         )
 
     def register_ra(

@@ -104,7 +104,9 @@ class RegistrationAuthority:
     def reg_client(self) -> RegistrationClient:
         """Get or create registration client instance."""
         if self._reg_client is None:
-            self._reg_client = RegistrationClient(host=self.ca_host, logger=self.logger)
+            self._reg_client = RegistrationClient(
+                host=self.ca_host, port=self.ca_port + 1, logger=self.logger
+            )
         return self._reg_client
 
     @property

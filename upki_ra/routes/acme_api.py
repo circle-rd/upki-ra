@@ -939,7 +939,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             base = str(request.base_url).rstrip("/")
             nonce = uuid.uuid4().hex
             storage.add_nonce(nonce)
-            return JSONResponse(
+            return JSONResponse(  # type: ignore[return-value]
                 content={
                     "type": "http-01",
                     "url": http01["url"],
@@ -962,7 +962,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         nonce = uuid.uuid4().hex
         storage.add_nonce(nonce)
-        return JSONResponse(
+        return JSONResponse(  # type: ignore[return-value]
             content={
                 "type": "http-01",
                 "url": http01["url"],
@@ -1002,7 +1002,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             base = str(request.base_url).rstrip("/")
             nonce = uuid.uuid4().hex
             storage.add_nonce(nonce)
-            return JSONResponse(
+            return JSONResponse(  # type: ignore[return-value]
                 content={
                     "type": "dns-01",
                     "url": dns01["url"],
@@ -1029,7 +1029,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         nonce = uuid.uuid4().hex
         storage.add_nonce(nonce)
-        return JSONResponse(
+        return JSONResponse(  # type: ignore[return-value]
             content={
                 "type": "dns-01",
                 "url": dns01["url"],
@@ -1075,7 +1075,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
             base = str(request.base_url).rstrip("/")
             nonce = uuid.uuid4().hex
             storage.add_nonce(nonce)
-            return JSONResponse(
+            return JSONResponse(  # type: ignore[return-value]
                 content={
                     "type": "tls-alpn-01",
                     "url": tls01["url"],
@@ -1102,7 +1102,7 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
 
         nonce = uuid.uuid4().hex
         storage.add_nonce(nonce)
-        return JSONResponse(
+        return JSONResponse(  # type: ignore[return-value]
             content={
                 "type": "tls-alpn-01",
                 "url": tls01["url"],
@@ -1265,6 +1265,8 @@ def create_acme_routes(ra: RegistrationAuthority) -> APIRouter:
         try:
             cn_attrs = cert_obj.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
             cn = cn_attrs[0].value if cn_attrs else None
+            if isinstance(cn, bytes):
+                cn = cn.decode("utf-8")
         except Exception:
             cn = None
 
