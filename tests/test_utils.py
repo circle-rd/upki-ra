@@ -171,14 +171,11 @@ HQYDVR0OBBYEFH9YJ9YJ9YJ9YJ9YJ9YJ9YJ9YMB8GA1UdIwQYMBaAFH9YJ9YJ
 
     def test_format_error(self):
         """Test error formatting."""
-        response, status_code = format_error(
-            message="Error occurred", code="ERROR_CODE", status_code=400
-        )
+        response = format_error(message="Error occurred", code="ERROR_CODE", status_code=400)
 
         self.assertEqual(response["status"], "error")
         self.assertEqual(response["code"], "ERROR_CODE")
         self.assertEqual(response["message"], "Error occurred")
-        self.assertEqual(status_code, 400)
 
     def test_validate_required_fields(self):
         """Test required fields validation."""

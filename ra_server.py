@@ -77,6 +77,22 @@ def create_app(ra: RegistrationAuthority) -> FastAPI:
     app.include_router(create_inventory_routes(ra), prefix="/api/v1/inventory")
     app.include_router(create_ws_routes(ra), prefix="/api/v1/inventory")
 
+    def _error_content(detail: object, fallback_code: str) -> dict:
+        """Build a `{status, code, message}` error body from an
+        `HTTPException.detail`.
+
+        `detail` is either a dict already shaped like `format_error()`'s
+        output (has its own `code`/`message`) or a bare string (e.g. FastAPI/
+        Starlette's own default `detail="Not Found"`, or a handful of
+        call sites that still raise `HTTPException(..., detail="some string")`
+        directly instead of via `format_error()`). Every response must carry
+        a `code` either way, so a bare string gets wrapped with
+        `fallback_code` instead of silently coming back with none.
+        """
+        if isinstance(detail, dict) and "code" in detail and "message" in detail:
+            return {"status": "error", "code": detail["code"], "message": detail["message"]}
+        return {"status": "error", "code": fallback_code, "message": str(detail)}
+
     # Error handlers
     @app.exception_handler(UPKIError)
     async def handle_upki_error(request: Request, error: UPKIError):
@@ -102,30 +118,39 @@ def create_app(ra: RegistrationAuthority) -> FastAPI:
             )
         return JSONResponse(
             status_code=error.status_code,
-            content={"status": "error", "message": str(error.detail)},
+            content=_error_content(error.detail, "HTTP_ERROR"),
         )
 
     @app.exception_handler(404)
     async def handle_not_found(request: Request, error: Exception):
+        # Starlette resolves handlers registered on the exact status code
+        # BEFORE the generic HTTPException handler above for 404s
+        # specifically (unlike other status codes) - this fires for both a
+        # genuinely unmatched route AND any intentional
+        # `HTTPException(status_code=404, detail=...)` raised by route code,
+        # so it must apply the exact same code/message-preserving logic,
+        # not silently discard a real, informative 404 (e.g. "Certificate
+        # not found") in favor of a generic one.
+        detail = error.detail if isinstance(error, HTTPException) else "Not found"
         if request.url.path.startswith("/acme/"):
             return JSONResponse(
                 status_code=404,
                 content={
                     "type": "urn:ietf:params:acme:error:malformed",
-                    "detail": "Not found",
+                    "detail": str(detail),
                     "status": 404,
                 },
             )
         return JSONResponse(
             status_code=404,
-            content={"status": "error", "message": "Not found"},
+            content=_error_content(detail, "NOT_FOUND"),
         )
 
     @app.exception_handler(500)
     async def handle_internal_error(request: Request, error: Exception):
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "message": "Internal server error"},
+            content={"status": "error", "code": "INTERNAL_ERROR", "message": "Internal server error"},
         )
 
     return app

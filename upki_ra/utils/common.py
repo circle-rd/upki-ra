@@ -386,18 +386,26 @@ def format_response(
     return response
 
 
-def format_error(message: str, code: str = "ERROR", status_code: int = 500) -> tuple:
-    """Format a standard error response.
+def format_error(message: str, code: str = "ERROR", status_code: int = 500) -> dict:
+    """Format a standard error response body.
+
+    Every caller uses this as `HTTPException(status_code=..., detail=format_error(...))`
+    - the HTTP status is passed to `HTTPException` directly, never read from
+    this function's return value. `code` is a stable, machine-readable
+    identifier (never translated) that a client can map to a localized
+    message; `message` is the current English fallback text.
 
     Args:
-        message: Error message.
-        code: Error code.
-        status_code: HTTP status code.
+        message: Human-readable error message (English fallback).
+        code: Stable machine-readable error code.
+        status_code: Unused here - kept only so existing call sites that
+            pass it positionally alongside `code` don't need to change.
 
     Returns:
-        Tuple of (response_dict, status_code).
+        Error response body: `{"status": "error", "code": ..., "message": ...}`.
     """
-    return ({"status": "error", "code": code, "message": message}, status_code)
+    del status_code
+    return {"status": "error", "code": code, "message": message}
 
 
 def validate_required_fields(data: dict[str, Any], required: list[str]) -> str | None:
