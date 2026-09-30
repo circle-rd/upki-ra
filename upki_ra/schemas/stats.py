@@ -14,11 +14,12 @@ from .common import CamelModel
 
 
 class CertificateStats(CamelModel):
-    """The 5 KPI counters shown on the Dashboard overview."""
+    """The 6 KPI counters shown on the Dashboard overview."""
 
     total: int
     active: int
     expiring_soon: int
+    expired: int
     revoked: int
     pending_csrs: int = Field(alias="pendingCSRs")
 

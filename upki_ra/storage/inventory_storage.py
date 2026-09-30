@@ -27,6 +27,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from ..utils.cert_metadata import compute_status
+
 # Public API field name -> actual SQL column name. Never build SQL from
 # caller-supplied strings directly; always resolve through this mapping.
 CERTIFICATE_SORT_COLUMNS: dict[str, str] = {
@@ -39,6 +41,18 @@ CERTIFICATE_SORT_COLUMNS: dict[str, str] = {
     "issuer": "issuer_dn",
     "serialNumber": "serial",
 }
+
+# A certificate's real, current status can't be trusted from the stored
+# `status` column alone (see `_decode_certificate_row`): it's only ever
+# written once at issuance/revocation time, so a certificate simply passing
+# its `valid_to` date would otherwise be reported "valid" forever. Every
+# query filtering/counting by status must use this expression instead of
+# the raw column - fixed/hardcoded, never built from caller input.
+CERTIFICATE_STATUS_EXPR = (
+    "(CASE WHEN status = 'revoked' THEN 'revoked' "
+    "WHEN valid_to <= CURRENT_TIMESTAMP THEN 'expired' "
+    "ELSE 'valid' END)"
+)
 
 ACTIVITY_SORT_COLUMNS: dict[str, str] = {
     "timestamp": "timestamp",
@@ -530,7 +544,7 @@ class InventoryStorage:
             like_term = f"%{search}%"
             params.extend([like_term, like_term, like_term])
         if status:
-            where_clauses.append("status = ?")
+            where_clauses.append(f"{CERTIFICATE_STATUS_EXPR} = ?")
             params.append(status)
         if profile_id:
             where_clauses.append("profile_id = ?")
@@ -563,6 +577,16 @@ class InventoryStorage:
         result = dict(row)
         result["key_usage"] = json.loads(result["key_usage"] or "[]")
         result["san"] = json.loads(result["san"] or "[]")
+        # `status` is only ever written once, at issuance/revocation time,
+        # and never revisited afterwards - a certificate that simply passes
+        # its `valid_to` date would otherwise be reported "valid" forever.
+        # Recompute it live from the current time on every read instead of
+        # trusting the stored snapshot; `revoked` is the one real, tracked
+        # state transition so it stays authoritative.
+        result["status"] = compute_status(
+            datetime.fromisoformat(result["valid_to"]),
+            revoked=result["status"] == "revoked",
+        )
         return result
 
     def get_certificate_by_common_name(
@@ -593,7 +617,7 @@ class InventoryStorage:
         conn = self._get_connection()
         if status:
             row = conn.execute(
-                "SELECT * FROM certificates WHERE common_name = ? AND status = ? "
+                f"SELECT * FROM certificates WHERE common_name = ? AND {CERTIFICATE_STATUS_EXPR} = ? "
                 "ORDER BY rowid DESC LIMIT 1",
                 (common_name, status),
             ).fetchone()
@@ -629,14 +653,17 @@ class InventoryStorage:
         conn = self._get_connection()
         total = conn.execute("SELECT COUNT(*) FROM certificates").fetchone()[0]
         active = conn.execute(
-            "SELECT COUNT(*) FROM certificates WHERE status = 'valid'"
+            f"SELECT COUNT(*) FROM certificates WHERE {CERTIFICATE_STATUS_EXPR} = 'valid'"
         ).fetchone()[0]
         revoked = conn.execute(
             "SELECT COUNT(*) FROM certificates WHERE status = 'revoked'"
         ).fetchone()[0]
         expiring_soon = conn.execute(
-            "SELECT COUNT(*) FROM certificates WHERE status = 'valid' "
+            f"SELECT COUNT(*) FROM certificates WHERE {CERTIFICATE_STATUS_EXPR} = 'valid' "
             "AND valid_to <= DATETIME('now', '+90 days')"
+        ).fetchone()[0]
+        expired = conn.execute(
+            f"SELECT COUNT(*) FROM certificates WHERE {CERTIFICATE_STATUS_EXPR} = 'expired'"
         ).fetchone()[0]
         pending_csrs = conn.execute(
             "SELECT COUNT(*) FROM csr_requests WHERE status = 'pending'"
@@ -645,6 +672,7 @@ class InventoryStorage:
             "total": total,
             "active": active,
             "expiringSoon": expiring_soon,
+            "expired": expired,
             "revoked": revoked,
             "pendingCSRs": pending_csrs,
         }
@@ -669,10 +697,10 @@ class InventoryStorage:
         """
         conn = self._get_connection()
         rows = conn.execute(
-            """
+            f"""
             SELECT strftime('%Y-%m', valid_to) as month, COUNT(*) as count
             FROM certificates
-            WHERE status = 'valid'
+            WHERE {CERTIFICATE_STATUS_EXPR} = 'valid'
               AND valid_to BETWEEN CURRENT_TIMESTAMP AND DATETIME('now', ? || ' months')
             GROUP BY month
             """,

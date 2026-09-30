@@ -40,14 +40,11 @@ class TestAPIResponses(unittest.TestCase):
         """Test error format structure."""
         from upki_ra.utils.common import format_error
 
-        response, status_code = format_error(
-            message="Test error", code="TEST_ERROR", status_code=400
-        )
+        response = format_error(message="Test error", code="TEST_ERROR", status_code=400)
 
         self.assertEqual(response["status"], "error")
         self.assertEqual(response["code"], "TEST_ERROR")
         self.assertEqual(response["message"], "Test error")
-        self.assertEqual(status_code, 400)
 
 
 class TestRegistrationAuthority(unittest.TestCase):
@@ -204,6 +201,93 @@ class TestTLSAuth(unittest.TestCase):
 
         cn = auth.extract_cn_from_dn("CN=test,O=Org,C=US")
         self.assertEqual(cn, "test")
+
+
+class TestErrorResponseShape(unittest.TestCase):
+    """Regression tests for the RA app's global error handlers (`ra_server.py`).
+
+    `format_error()` used to return a `(dict, status_code)` tuple while every
+    call site used it as `detail=format_error(...)` - the whole tuple ended
+    up as `HTTPException.detail`, and depending on which global exception
+    handler picked it up, a client ended up with either a Python-repr string
+    with no top-level `code` field, or (for 404s specifically) a hardcoded
+    generic message that silently discarded the real code/message entirely.
+    These tests hit the REAL app built by `ra_server.create_app()` (not a
+    bare `FastAPI()` with just routes attached, which bypasses the buggy
+    handlers entirely and would never have caught this).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        import os
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        from upki_ra.core.upki_logger import UPKILogger
+        from upki_ra.registration_authority import RegistrationAuthority
+
+        ra_server_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ra_server.py")
+        spec = importlib.util.spec_from_file_location("ra_server", ra_server_path)
+        ra_server = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ra_server)
+
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.ra = RegistrationAuthority(
+            data_dir=cls.temp_dir, logger=UPKILogger(name="test-error-shape")
+        )
+        cls.app = ra_server.create_app(cls.ra)
+        cls.client = TestClient(cls.app)
+
+    def test_structured_404_preserves_code_and_message(self):
+        """A route-level `HTTPException(404, detail=format_error(...))` must
+        keep its specific code/message, not be replaced by the generic 404
+        handler's hardcoded "Not found"."""
+        resp = self.client.get("/api/v1/inventory/certificates/DOES-NOT-EXIST")
+        self.assertEqual(resp.status_code, 404)
+        body = resp.json()
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["code"], "NOT_FOUND")
+        self.assertEqual(body["message"], "Certificate not found")
+
+    def test_unmatched_route_404_still_has_a_code(self):
+        """A genuinely unmatched route (no `HTTPException` raised by any
+        route handler) must still get a `code` field, not just a bare
+        message."""
+        resp = self.client.get("/api/v1/totally/bogus/path")
+        self.assertEqual(resp.status_code, 404)
+        body = resp.json()
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["code"], "NOT_FOUND")
+
+    def test_non_404_error_has_clean_code_not_a_tuple_repr(self):
+        """A non-404 `HTTPException(..., detail=format_error(...))` must
+        return the exact code/message, never a Python-repr string of the
+        old `(dict, status_code)` tuple `format_error()` used to return."""
+        self.ra.inventory.upsert_certificate(
+            {
+                "serial": "ERR-SHAPE-TEST",
+                "dn": "CN=err-shape-test.example.com",
+                "common_name": "err-shape-test.example.com",
+                "key_type": "RSA-2048",
+                "status": "valid",
+                "valid_from": "2024-01-01T00:00:00Z",
+                "valid_to": "2099-01-01T00:00:00Z",
+            }
+        )
+        resp = self.client.post(
+            "/api/v1/inventory/certificates/ERR-SHAPE-TEST/revoke",
+            json={"reason": "not-a-real-reason"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        body = resp.json()
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["code"], "VALIDATION_ERROR")
+        self.assertNotIn("status_code", body)
+        # The old bug embedded the whole tuple's Python repr in the message,
+        # e.g. "({'status': 'error', ...}, 400)" - that shape must be gone.
+        self.assertNotIn("{'status'", body["message"])
 
 
 if __name__ == "__main__":
