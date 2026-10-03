@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "upki-ra"
-version = "0.1.5"
+version = "0.1.6"
 description = "uPKI Registration Authority Server"
 readme = "README.md"
 authors = ["uPKI Team <info@upki.example.com>"]
